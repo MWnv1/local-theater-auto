@@ -1,0 +1,31 @@
+local-theater-auto（本地图文小剧场自动化）
+Copyright 2026 MWnv1
+
+This product is licensed under the Apache License, Version 2.0.
+Full license text: see the LICENSE file in this directory,
+or http://www.apache.org/licenses/LICENSE-2.0
+
+Author / Maintainer : MWnv1
+GitHub              : https://github.com/MWnv1
+Websites            : https://imworkingnow.cc.cd
+                      https://imwn.cc.cd
+                      https://imwn.dpdns.org
+
+Generated           : 2026-11-07 09:31:28 +08:00 (Asia/Shanghai)
+Timestamp (UTC)     : 2026-11-07T01:31:28Z
+Timestamp (Unix)    : 1794015088
+
+------------------------------------------------------------------------
+Third-party components (installed via requirements.txt, NOT bundled here):
+
+  * OpenVINO / optimum-intel / nncf      Apache-2.0
+  * Transformers / Diffusers             Apache-2.0
+  * Pillow (Pillow-SIMD)                 HPND / MIT-CMU
+  * rembg                               MIT        (u2net 模型权重按其原始许可使用)
+  * onnxruntime                         MIT
+  * pyttsx3                             MPL-2.0    （Windows SAPI5 离线合成）
+  * mcp (Model Context Protocol SDK)     MIT
+  * FFmpeg                              LGPL-2.1（若启用 GPL 组件则为 GPL）
+  * Qwen3-4B / FLUX.1-schnell 模型权重   遵循各自模型卡（Model Card）许可
+
+以上第三方组件的许可条款独立生效，与本项目 Apache-2.0 授权互不影响。

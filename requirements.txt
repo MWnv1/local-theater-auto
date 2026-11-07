@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 MWnv1 (GitHub: https://github.com/MWnv1)
+# Websites: https://imworkingnow.cc.cd | https://imwn.cc.cd | https://imwn.dpdns.org
+# Generated: 2026-11-07 09:31:28 +08:00 (Asia/Shanghai) [UTC 2026-11-07T01:31:28Z]
+#
+# 本地图文小剧场 —— OpenVINO / Intel 平台依赖
+# 安装： python -m pip install -r requirements.txt
+# 注意：必须 64 位 Python（OpenVINO 不支持 32 位）
+
+# --- MCP 服务端 ---
+mcp>=1.2.0
+
+# --- 绘图（OpenVINO 核显） ---
+openvino>=2024.4.0
+openvino-tokenizers>=2024.4.0
+optimum[openvino]>=1.21.0
+nncf>=2.14.1
+transformers>=4.44.0
+diffusers>=0.31.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+huggingface_hub>=0.24.0
+numpy>=1.24.0
+
+# --- 抠图（离线，需预置 u2net.onnx） ---
+rembg>=2.0.57
+onnxruntime>=1.17.0
+
+# --- 图像合成 ---
+pillow>=10.2.0
+
+# --- 离线配音（Windows SAPI5） ---
+pyttsx3>=2.90
+comtypes>=1.2.0; sys_platform == "win32"
+
+# ffmpeg / ffprobe 为外部可执行文件，不通过 pip 安装，见 README

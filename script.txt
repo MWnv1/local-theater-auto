@@ -1,0 +1,21 @@
+# Copyright 2026 MWnv1 (GitHub: https://github.com/MWnv1)
+# Websites: https://imworkingnow.cc.cd | https://imwn.cc.cd | https://imwn.dpdns.org
+# Apache-2.0 | Generated: 2026-11-07 09:31:28 +08:00
+# 以 # 开头的行会被解析器忽略，可安全当作剧本注释
+
+【镜头1】机房，夜里，机柜风扇声很吵
+【小林：站位：左】
+【阿杰：站位：右】
+小林：这个模型真能离线跑？
+阿杰：4bit 的，NPU 上 30 token/s。
+
+【镜头2】镜头拉近显示器
+【旁白】屏幕上是正在生成的立绘。
+小林：画得还挺像。
+阿杰：核显跑的，不用联网。
+
+【镜头3】两人收拾东西准备走
+【小林：站位：左】
+【阿杰：站位：居中】
+小林：明天把配音也接上。
+阿杰：SAPI5 就行，别折腾新模型了。

@@ -1,0 +1,39 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ---- 虚拟环境 ----
+.venv/
+.venv*/
+venv/
+env/
+
+# ---- 运行产物（本仓库不提交） ----
+cache/
+output/
+_tools/
+*.log
+*.tmp
+
+# ---- 模型权重 / 大文件 ----
+models/
+*.onnx
+*.onnx.data
+*.xml
+*.bin
+*.gguf
+*.safetensors
+*.mp4
+*.wav
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
