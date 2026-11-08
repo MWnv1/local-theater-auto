@@ -15,6 +15,16 @@ Generated           : 2026-11-07 09:31:28 +08:00 (Asia/Shanghai)
 Timestamp (UTC)     : 2026-11-07T01:31:28Z
 Timestamp (Unix)    : 1794015088
 
+EULA                : See the EULA.md file in this directory.
+                      The source code is Apache-2.0; official releases,
+                      model weights, branding and attribution are additionally
+                      governed by EULA.md (effective 2026-11-08).
+                      All content generated with this software is unrelated to
+                      and unmonitored by the author; responsibility for any
+                      generated output, including infringement of portrait,
+                      voice, copyright or trademark rights, rests solely with
+                      the user.
+
 ------------------------------------------------------------------------
 Third-party components (installed via requirements.txt, NOT bundled here):
 
