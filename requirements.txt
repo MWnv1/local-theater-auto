@@ -27,11 +27,20 @@ huggingface_hub>=0.24.0
 numpy>=1.24.0
 
 # --- 可选：NVIDIA 显卡加速（CUDA 版 PyTorch，装完 DRAW_BACKEND=auto 会自动走 cuda） ---
-# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# RTX 20/30/40 系：cu121 / cu124 都行；RTX 50 系（Blackwell）必须 cu128 及以上。
+# pip install torch --index-url https://download.pytorch.org/whl/cu128
+#
+# 国内下载慢或 TLS 报 DECRYPTION_FAILED_OR_BAD_RECORD_MAC 时，改从阿里云 wheel 镜像直取：
+#   curl -L -o torch-cu128.whl https://mirrors.aliyun.com/pytorch-wheels/cu128/torch-2.9.1%2Bcu128-cp312-cp312-win_amd64.whl
+#   pip install --no-deps --force-reinstall torch-cu128.whl
 #
 # --- 可选：AMD 显卡加速（Windows 用 DirectML；Linux 用 ROCm 版 PyTorch） ---
 # pip install torch torch-directml          # Windows
 # pip install torch --index-url https://download.pytorch.org/whl/rocm6.2   # Linux
+#
+# --- 建议：全部装到 D 盘（Python 3.12 + venv 都要在 D 盘，3.14 没有这些轮子） ---
+# 完整步骤见 README 第 12 节「全 D 盘安装」，本机已按该流程跑通。
+# 注意一次装太多包会撞 pip 的 resolution-too-deep，按 README 里的分批命令装。
 
 # --- 抠图（离线，需预置 u2net.onnx） ---
 rembg>=2.0.57

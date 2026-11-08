@@ -107,12 +107,14 @@ def check_ffmpeg():
         for enc in ("h264_nvenc", "h264_amf", "h264_qsv", "h264_videotoolbox", "libx264", "aac"):
             add(OK if enc in text else WARN, f"编码器 {enc}", "可用" if enc in text else "不可用")
 
-        # 真编一次 2 帧黑场，确认这个编码器不是"只有名字没有实现"
+        # 真编一次 3 帧黑场，确认这个编码器不是"只有名字没有实现"
+        # 注意：NVENC 有最小帧尺寸限制，64x64 会报 "Frame Dimension less than
+        # the minimum supported value"，必须用 320x240 这类正常尺寸来测。
         try:
             args = hardware.encoder_quality_args(chosen, "23")
             r2 = subprocess.run(
                 [ff, "-hide_banner", "-v", "error", "-f", "lavfi",
-                 "-i", "color=c=black:s=64x64:d=0.1", "-c:v", chosen] + args + ["-f", "null", "-"],
+                 "-i", "color=c=black:s=320x240:d=0.1", "-c:v", chosen] + args + ["-f", "null", "-"],
                 capture_output=True, text=True, timeout=30,
             )
             if r2.returncode == 0:
@@ -153,17 +155,39 @@ def check_hardware():
 
 
 def check_models():
-    from theater import MODEL_ROOT
+    from theater import MODEL_ROOT, hardware
 
-    draw_dir = os.environ.get("DRAW_MODEL_DIR", os.path.join(MODEL_ROOT, "flux-schnell-int4-ov"))
-    if os.path.isdir(draw_dir) and os.listdir(draw_dir):
-        files = os.listdir(draw_dir)
-        has_ov = any(f.endswith((".xml", ".bin")) for f in files) or any(
-            os.path.isdir(os.path.join(draw_dir, f)) for f in files
-        )
-        add(OK if has_ov else WARN, "绘图模型", f"{draw_dir}（{len(files)} 项）")
+    # 后端决定模型格式：torch 要 diffusers 目录（model_index.json），
+    # OpenVINO 要 IR（.xml/.bin），两者不能混用，所以分开查。
+    ov_dir = os.environ.get("DRAW_MODEL_DIR", os.path.join(MODEL_ROOT, "flux-schnell-int4-ov"))
+    torch_dir = os.environ.get("TORCH_MODEL_DIR", os.path.join(MODEL_ROOT, "flux-schnell"))
+    backend = ""
+    try:
+        import theater.ai_draw as ai_draw
+
+        backend = ai_draw.resolve_backend()["backend"]
+    except Exception:
+        backend = "openvino"
+
+    primary = torch_dir if backend == "torch" else ov_dir
+    if os.path.isdir(primary) and os.listdir(primary):
+        if backend == "torch":
+            ok = os.path.exists(os.path.join(primary, "model_index.json"))
+            add(OK if ok else WARN, "绘图模型", f"{primary}（diffusers 目录）" if ok
+                else f"{primary} 缺 model_index.json，torch 后端无法加载")
+        else:
+            files = os.listdir(primary)
+            has_ir = any(f.endswith((".xml", ".bin")) for f in files) or any(
+                os.path.isdir(os.path.join(primary, f)) for f in files
+            )
+            add(OK if has_ir else WARN, "绘图模型", f"{primary}（{len(files)} 项）")
     else:
-        add(FAIL, "绘图模型", f"不存在或为空：{draw_dir}")
+        add(FAIL, "绘图模型", f"不存在或为空：{primary}（当前后端 {backend}）")
+
+    # 另一套格式不要求存在，只提示
+    other = ov_dir if backend == "torch" else torch_dir
+    if os.path.isdir(other) and os.listdir(other):
+        add(OK, "备用绘图模型", f"{other}（当前后端用不到它）")
 
     llm_dir = os.environ.get("LLM_MODEL_DIR", os.path.join(MODEL_ROOT, "qwen3-4b-int4-ov"))
     if os.path.isdir(llm_dir) and os.listdir(llm_dir):

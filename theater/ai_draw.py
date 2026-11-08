@@ -35,8 +35,12 @@ from typing import Dict, Optional
 
 from . import MODEL_ROOT, subdir, safe_name, text_key, hardware
 
+# OpenVINO 后端用 INT4 IR 目录；torch 后端用 HF/diffusers 格式目录（两者不能混用）
 DRAW_MODEL_DIR = os.environ.get(
     "DRAW_MODEL_DIR", os.path.join(MODEL_ROOT, "flux-schnell-int4-ov")
+)
+TORCH_MODEL_DIR = os.environ.get(
+    "TORCH_MODEL_DIR", os.path.join(MODEL_ROOT, "flux-schnell")
 )
 # auto / openvino / torch；auto 时按显卡厂商自动选（见 hardware.pick_draw_backend）
 DRAW_BACKEND = os.environ.get("DRAW_BACKEND", "auto")
@@ -106,24 +110,25 @@ def get_pipe(device: Optional[str] = None):
         if _pipe is not None:
             return _pipe
 
-        if not os.path.isdir(DRAW_MODEL_DIR) or not os.listdir(DRAW_MODEL_DIR):
+        info = resolve_backend()
+        model_dir = TORCH_MODEL_DIR if info["backend"] == "torch" else DRAW_MODEL_DIR
+        if not os.path.isdir(model_dir) or not os.listdir(model_dir):
             raise RuntimeError(
-                f"绘图模型目录不存在或为空：{DRAW_MODEL_DIR}\n"
-                "请先把模型包解压到该目录。\n"
-                "  Intel/CPU : Flux Schnell INT4 OpenVINO 模型\n"
-                "  NVIDIA/AMD: FLUX.1-schnell 的 PyTorch 权重（DRAW_BACKEND=torch）\n"
-                "详见 README 第 11 节「显卡适配」。"
+                f"绘图模型目录不存在或为空：{model_dir}\n"
+                "请先把模型放到该目录（都放在 D 盘）：\n"
+                "  Intel/CPU : Flux Schnell INT4 OpenVINO 模型 -> DRAW_MODEL_DIR\n"
+                "  NVIDIA/AMD: FLUX.1-schnell 的 diffusers 权重   -> TORCH_MODEL_DIR\n"
+                "详见 README 第 11 节「显卡适配」与第 12 节「全 D 盘安装」。"
             )
 
-        info = resolve_backend()
         if info["backend"] == "torch":
-            _pipe = _load_torch_pipe(device or info["device"])
+            _pipe = _load_torch_pipe(device or info["device"], model_dir)
         else:
-            _pipe = _load_openvino_pipe(device or info["device"])
+            _pipe = _load_openvino_pipe(device or info["device"], model_dir)
         return _pipe
 
 
-def _load_openvino_pipe(device: str):
+def _load_openvino_pipe(device: str, model_dir: Optional[str] = None):
     """optimum-intel + OpenVINO。Intel GPU / 任何平台 CPU。"""
     from optimum.intel.openvino import OVStableDiffusionPipeline  # 延迟导入
 
@@ -140,18 +145,23 @@ def _load_openvino_pipe(device: str):
     dev = (device or "").strip()
     if dev and dev.upper() != "AUTO":
         kwargs["device"] = dev
-    return pipe_cls.from_pretrained(DRAW_MODEL_DIR, **kwargs)
+    return pipe_cls.from_pretrained(model_dir or DRAW_MODEL_DIR, **kwargs)
 
 
-def _load_torch_pipe(device: str):
+def _load_torch_pipe(device: str, model_dir: Optional[str] = None):
     """diffusers + PyTorch。NVIDIA 走 CUDA，AMD 走 DirectML，兜底 CPU。
 
     注意：INT4 的 OpenVINO 模型（含 .xml/.bin）不能给 torch 用，
     这里要求目录里是 HuggingFace 格式权重（model_index.json）。
+
+    显存策略：FLUX.1-schnell 是 12B 参数，bf16 约 24GB，16G 显存装不下，
+    因此 CUDA 下显存不足 24GB 时自动 `enable_model_cpu_offload()`；
+    还不够就退到 sequential offload（更慢但一定能跑）。
     """
     import torch
     from diffusers import DiffusionPipeline
 
+    target = model_dir or TORCH_MODEL_DIR
     dev = (device or "").strip().lower()
 
     if dev == "dml":
@@ -159,22 +169,39 @@ def _load_torch_pipe(device: str):
 
         torch_dev = dml.device()
         dtype = torch.float16
-    elif dev == "cuda" and torch.cuda.is_available():
-        torch_dev = "cuda"
-        dtype = torch.float16
     elif dev.startswith("cuda") and torch.cuda.is_available():
         torch_dev = dev
-        dtype = torch.float16
+        dtype = torch.bfloat16
     else:
         torch_dev = "cpu"
         dtype = torch.float32
 
+    if not os.path.exists(os.path.join(target, "model_index.json")):
+        raise RuntimeError(
+            f"{target} 里没有 model_index.json，不是 diffusers 目录。\n"
+            "NVIDIA/AMD 的 torch 后端不能用 OpenVINO 的 INT4（.xml/.bin）模型，"
+            "请下载 black-forest-labs/FLUX.1-schnell 的 diffusers 权重。"
+        )
+
     pipe = DiffusionPipeline.from_pretrained(
-        DRAW_MODEL_DIR, torch_dtype=dtype, local_files_only=True
+        target, torch_dtype=dtype, local_files_only=True
     )
-    pipe.to(torch_dev)
+
     if torch_dev == "cpu":
         print("[warn] 绘图跑在 CPU 上，1024×1024 一张可能要几十秒")
+        pipe.to("cpu")
+        return pipe
+
+    if torch_dev != "dml" and hasattr(torch, "cuda"):
+        try:
+            total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        except Exception:
+            total = 0
+        if total and total < 24:
+            print(f"[info] 显存 {total:.1f} GB < 24 GB，启用 model_cpu_offload")
+            pipe.enable_model_cpu_offload()
+            return pipe
+    pipe.to(torch_dev)
     return pipe
 
 

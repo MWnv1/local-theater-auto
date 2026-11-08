@@ -21,6 +21,7 @@
 import hashlib
 import os
 import re
+import shutil
 
 # ---- 路径配置 --------------------------------------------------------------
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,6 +29,20 @@ CACHE_ROOT = os.environ.get("THEATER_CACHE", os.path.join(PROJECT_ROOT, "cache")
 MODEL_ROOT = os.environ.get("MODEL_ROOT", r"D:\ai_models")
 
 SUBDIRS = ("assets", "audio", "frames", "video_clips", "logs")
+
+# ffmpeg 的自动查找位置（按优先级）。装到这些位置任何一个都能直接用，
+# 不必再设 FFMPEG_PATH —— 省掉"装好了却说找不到 ffmpeg"的坑。
+_FFMPEG_NAME = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+_FFPROBE_NAME = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+
+_FFMPEG_CANDIDATES = (
+    os.path.join(PROJECT_ROOT, "tools", "ffmpeg", "bin", _FFMPEG_NAME),
+    os.path.join(PROJECT_ROOT, "tools", "ffmpeg", _FFMPEG_NAME),
+    os.path.join(PROJECT_ROOT, "_tools", "ffmpeg", "bin", _FFMPEG_NAME),
+    os.path.join(PROJECT_ROOT, "_tools", "ffmpeg", _FFMPEG_NAME),
+    r"D:\ffmpeg\bin\ffmpeg.exe",
+    r"D:\ffmpeg\ffmpeg.exe",
+)
 
 
 def ensure_dirs() -> None:
@@ -43,8 +58,23 @@ def subdir(name: str) -> str:
 
 
 def ffmpeg_path() -> str:
-    """ffmpeg 可执行文件。默认取 PATH，可用 FFMPEG_PATH 覆盖。"""
-    return os.environ.get("FFMPEG_PATH", "ffmpeg")
+    """ffmpeg 可执行文件。
+
+    查找顺序：
+      1. 环境变量 FFMPEG_PATH（显式指定优先）
+      2. 项目内的常见安装位置（`tools/ffmpeg/bin`、`_tools/ffmpeg/bin`、`D:\\ffmpeg\\bin`）
+      3. 系统 PATH
+
+    找不到时返回 "ffmpeg"，由调用方给出可读错误。
+    """
+    explicit = os.environ.get("FFMPEG_PATH")
+    if explicit:
+        return explicit
+    for cand in _FFMPEG_CANDIDATES:
+        if os.path.exists(cand):
+            return cand
+    found = shutil.which("ffmpeg")
+    return found or "ffmpeg"
 
 
 def ffprobe_path() -> str:
@@ -55,9 +85,11 @@ def ffprobe_path() -> str:
     exe = ffmpeg_path()
     d = os.path.dirname(exe)
     if d:
-        name = "ffprobe.exe" if exe.lower().endswith(".exe") else "ffprobe"
-        return os.path.join(d, name)
-    return "ffprobe"
+        name = _FFPROBE_NAME
+        p = os.path.join(d, name)
+        return p if os.path.exists(p) else name
+    found = shutil.which("ffprobe")
+    return found or "ffprobe"
 
 
 # ---- 名称处理 --------------------------------------------------------------

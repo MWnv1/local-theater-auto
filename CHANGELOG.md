@@ -3,6 +3,42 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.0] - 2026-11-08
+
+全 D 盘安装 + 首次真机跑通（Python 3.12 / CUDA torch / 带 NVENC 的 ffmpeg / FLUX 权重全部落在 D 盘）。
+
+### Added
+
+- `theater/__init__.py`：`ffmpeg_path()` / `ffprobe_path()` 自动查找，候选路径依次为
+  `FFMPEG_PATH` → `项目根\tools\ffmpeg\bin` → `项目根\tools\ffmpeg` → `_tools\ffmpeg\bin`
+  → `_tools\ffmpeg` → `D:\ffmpeg\bin` → `D:\ffmpeg` → `PATH`。不再要求用户手动配环境变量。
+- `TORCH_MODEL_DIR`（默认 `$MODEL_ROOT/flux-schnell`）：torch 后端专用的 diffusers 目录，
+  与 OpenVINO 的 `DRAW_MODEL_DIR` 分开，避免"INT4 IR 喂给 torch"这类格式错配。
+- `README.md` 第 12 节「全 D 盘安装」：目录结构、五步安装脚本、模型下载命令、
+  四条验证命令、本机实测数据、网络可用性对照表、16 GB 显存跑 FLUX 的 offload 策略。
+- `requirements.txt` 补 cu128 与 D 盘安装提示。
+
+### Changed
+
+- `theater/ai_draw.py`：`_load_torch_pipe()` 现在按后端取模型目录；CUDA 下用 `bfloat16`
+  （原 `float16`）；显存 < 24 GB 时自动 `enable_model_cpu_offload()`（FLUX 12B 塞不进 16 GB 显存）；
+  目录缺 `model_index.json` 时给出"这不是 diffusers 目录"的明确报错。
+- `check_env.py`：
+  - **修 bug**：NVENC 真编测试原来用 `64x64` 黑场，NVENC 有最小帧尺寸限制，会报
+    `Frame Dimension less than the minimum supported value`，把能用的编码器误判成不可用；
+    改为 `320x240`。
+  - 模型检查改为按当前后端选目录（torch 查 `model_index.json`，OpenVINO 查 `*.xml/*.bin`），
+    另一套格式只作"备用模型"提示，不再因为没装 OpenVINO 模型就 FAIL。
+- `.gitignore` 增加 `tools/`（ffmpeg 等本地大二进制不入库）。
+
+### Verified
+
+- `check_env.py`：FAIL 0 项（WARN 2 项为 videotoolbox 不适用、Qwen3 剧本模型未下）。
+- `torch 2.9.1+cu128` + `torch.cuda.is_available() == True`，RTX 5060 Ti / 15.9 GB / bf16 支持。
+- ffmpeg `N-128691`（2026-11-08，BtbN GPL 构建）：`h264_nvenc` / `hevc_nvenc` / `av1_nvenc` /
+  `h264_amf` / `hevc_amf` / `libx264` 六种编码器**真编**通过。
+- 单元测试 25/25 通过。
+
 ## [1.2.0] - 2026-11-08
 
 ### Added

@@ -16,6 +16,7 @@ env/
 cache/
 output/
 _tools/
+tools/
 *.log
 *.tmp
 

@@ -215,10 +215,10 @@ SPDX:     AGPL-3.0-only OR LicenseRef-Commercial
 # Intel 核显 / Arc / 纯 CPU（基线，任何平台都能跑）
 pip install openvino openvino-tokenizers "optimum[openvino]" nncf diffusers
 
-# NVIDIA（CUDA 版 PyTorch）
-pip install torch --index-url https://download.pytorch.org/whl/cu124
+# NVIDIA（CUDA 版 PyTorch；RTX 50 系 / Blackwell 要 cu128 及以上）
+pip install torch --index-url https://download.pytorch.org/whl/cu128
 
-# AMD（Windows 用 DirectML）
+# AMD（Windows 用 DirectML；Linux 换 ROCm 版 torch）
 pip install torch torch-directml
 ```
 
@@ -241,7 +241,8 @@ INT4 的 OpenVINO 模型**不能**给 torch 用，反之亦然。`DRAW_MODEL_DIR
 |---|---|---|
 | `DRAW_BACKEND` | `auto` | `auto` / `openvino` / `torch` |
 | `DRAW_DEVICE` | `auto` | `auto` / `GPU` / `CPU` / `NPU` / `cuda` / `cuda:1` / `dml` |
-| `DRAW_MODEL_DIR` | `$MODEL_ROOT/flux-schnell-int4-ov` | 绘图模型目录 |
+| `DRAW_MODEL_DIR` | `$MODEL_ROOT/flux-schnell-int4-ov` | OpenVINO IR 绘图模型目录 |
+| `TORCH_MODEL_DIR` | `$MODEL_ROOT/flux-schnell` | torch 后端用的 diffusers 模型目录 |
 | `VIDEO_ENCODER` | `auto` | `auto` 或强制指定 `h264_nvenc` / `h264_amf` / `h264_qsv` / `libx264` |
 | `VIDEO_CODEC` | `h264` | `h264` / `hevc` / `av1` |
 | `NVENC_CQ` | `23` | NVENC 画质（0–51，越小越好） |
@@ -251,15 +252,146 @@ INT4 的 OpenVINO 模型**不能**给 torch 用，反之亦然。`DRAW_MODEL_DIR
 | `GPU_ADAPTERS` | — | 手动覆盖探测结果，如 `NVIDIA GeForce RTX 5060 Ti\|AMD Radeon(TM) Graphics` |
 | `GPU_VENDOR` | — | 只覆盖厂商判定：`nvidia` / `amd` / `intel` |
 
-### 11.5 本机实测（RTX 5060 Ti + Ryzen 5 9600X 核显）
+### 11.5 本机实测（RTX 5060 Ti + Ryzen 5 9600X 核显，已全量装到 D 盘）
 
 ```
-[OK  ] 显卡        NVIDIA GeForce RTX 5060 Ti、AMD Radeon(TM) Graphics
-[OK  ] 主显卡厂商   nvidia
-[FAIL] 绘图后端     未安装 openvino 或 torch，无法绘图
-[FAIL] ffmpeg      未找到
+[OK  ] 显卡              NVIDIA GeForce RTX 5060 Ti、AMD Radeon(TM) Graphics
+[OK  ] 主显卡厂商        nvidia
+[OK  ] 绘图后端          torch / cuda（NVIDIA 显卡 + PyTorch CUDA）
+[OK  ] ffmpeg            D:\AI_T_MCP\tools\ffmpeg\bin\ffmpeg.exe
+[OK  ] 选定视频编码器    h264_nvenc（nvidia 平台，硬编）
+[OK  ] h264_nvenc 实际可用性   编码测试通过
+[OK  ] 绘图模型          D:\ai_models\flux-schnell（diffusers 目录）
+[OK  ] 抠图模型 u2net.onnx     D:\ai_models\rembg\u2net.onnx
 ```
 
 - 探测正确：同时识别独显与核显，按"独显优先"判成 `nvidia`；
-- 编码器：本机 ffmpeg 缺失 → 自动 `libx264`（装带 NVENC 的 ffmpeg 后自动切 `h264_nvenc`）；
-- 绘图：装 CUDA 版 torch + 一份 FLUX.1-schnell 权重后即可走 `cuda`（INT4 OpenVINO 模型走不了 torch）。
+- 六种编码器**真编过**（各编 2–3 帧黑场）：`h264_nvenc` / `hevc_nvenc` / `av1_nvenc` / `h264_amf` / `hevc_amf` / `libx264` 全部通过；
+  `h264_qsv` 只有本机是 Intel 核显/Arc 时才可能真跑，在 AMD 核显上会失败并被跳过；
+- 绘图：CUDA 版 torch（2.9.1+cu128）+ FLUX.1-schnell 的 diffusers 权重 →
+  `DRAW_BACKEND=auto` 自动落到 `torch / cuda`；INT4 OpenVINO 模型（`.xml/.bin`）不能给 torch 用。
+- 装法与路径见下一节。
+
+
+## 12. 全 D 盘安装（本机已落地，可照抄）
+
+目标：**C 盘一个字节都不放**——Python、虚拟环境、ffmpeg、模型、pip 缓存/临时目录全在 D 盘。
+下面的路径就是本机实测可用的最终形态。
+
+### 12.1 装完的目录结构
+
+```
+D:\
+├─ Python312\                        Python 3.12.10（64 位，含 pip，不进 PATH）
+└─ AI_T_MCP\
+   ├─ .venv312\                      项目虚拟环境（3.12，不提交）
+   ├─ tools\ffmpeg\bin\              ffmpeg.exe / ffprobe.exe / ffplay.exe
+   ├─ _tools\                        安装垃圾场：安装包、wheel、下载脚本、pip 缓存、临时目录（不提交）
+   └─ theater\ ...                   项目源码
+D:\ai_models\
+├─ flux-schnell\                    FLUX.1-schnell 的 diffusers 权重（约 31.4 GB）
+└─ rembg\u2net.onnx                 离线抠图模型（176 MB）
+```
+
+为什么不用系统里那个 Python：本机 `py -3` 是 3.14，而 **OpenVINO / onnxruntime / torch 都没有 3.14 的轮子**，
+装依赖会在解析阶段就失败。所以要单独装一个 3.12，并且只服务这个项目。
+
+### 12.2 五步装完（PowerShell，可整段粘）
+
+```powershell
+# 1) Python 3.12 静默装到 D 盘（华为云镜像，约 8 MB/s）
+curl.exe -L -o D:\AI_T_MCP\_tools\python-3.12.10-amd64.exe `
+  https://mirrors.huaweicloud.com/python/3.12.10/python-3.12.10-amd64.exe
+& D:\AI_T_MCP\_tools\python-3.12.10-amd64.exe /quiet InstallAllUsers=0 `
+  TargetDir=D:\Python312 Include_pip=1 Include_launcher=0 PrependPath=0 `
+  Shortcuts=0 Include_test=0 Associates=0
+
+# 2) 建虚拟环境（3.12），并把 pip 的缓存/临时目录也挪到 D 盘
+D:\Python312\python.exe -m venv D:\AI_T_MCP\.venv312
+$env:PIP_CACHE_DIR = "D:\AI_T_MCP\_tools\pipcache"
+$env:TEMP = "D:\AI_T_MCP\_tools\temp"; $env:TMP = $env:TEMP
+D:\AI_T_MCP\.venv312\Scripts\python.exe -m pip install -U pip setuptools wheel `
+  -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+# 3) 装 CUDA 版 PyTorch（RTX 50 系必须 cu128；这里走阿里云 wheel 镜像）
+curl.exe -L -C - -o "D:\AI_T_MCP\_tools\torch-2.9.1+cu128-cp312-cp312-win_amd64.whl" `
+  "https://mirrors.aliyun.com/pytorch-wheels/cu128/torch-2.9.1%2Bcu128-cp312-cp312-win_amd64.whl"
+D:\AI_T_MCP\.venv312\Scripts\python.exe -m pip install --no-deps --force-reinstall `
+  "D:\AI_T_MCP\_tools\torch-2.9.1+cu128-cp312-cp312-win_amd64.whl"
+
+# 4) 其余依赖（分批装，一次装完会撞 pip 的 resolution-too-deep）
+$py = "D:\AI_T_MCP\.venv312\Scripts\python.exe"
+& $py -m pip install numpy"<"2.3 pillow pyttsx3 comtypes -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+& $py -m pip install openvino openvino-tokenizers "optimum[intel]" nncf -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+& $py -m pip install transformers diffusers accelerate safetensors huggingface_hub -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+& $py -m pip install onnxruntime rembg mcp -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+# 5) ffmpeg（要带 nvenc/amf/qsv 的静态构建）
+curl.exe -L -C - -o D:\AI_T_MCP\_tools\ffmpeg-btbN.zip `
+  "https://gh-proxy.com/https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+Expand-Archive -LiteralPath D:\AI_T_MCP\_tools\ffmpeg-btbN.zip -DestinationPath D:\AI_T_MCP\tools\ffmpeg_tmp -Force
+Move-Item D:\AI_T_MCP\tools\ffmpeg_tmp\ffmpeg-master-latest-win64-gpl D:\AI_T_MCP\tools\ffmpeg
+```
+
+装完后的 ffmpeg 会被自动找到：`theater/__init__.py::ffmpeg_path()` 依次找
+`FFMPEG_PATH` → `项目根\tools\ffmpeg\bin` → `项目根\tools\ffmpeg` → `_tools\ffmpeg\bin` → `_tools\ffmpeg`
+→ `D:\ffmpeg\bin` → `D:\ffmpeg` → `PATH`。所以哪怕不加环境变量也能直接跑。
+
+### 12.3 模型（都放 D:\ai_models）
+
+```powershell
+# NVIDIA/AMD（torch 后端）：FLUX.1-schnell 的 diffusers 权重，约 31.4 GB
+# HF 那个仓库需要登录，国内用 ModelScope 的镜像更快更省事
+D:\AI_T_MCP\.venv312\Scripts\python.exe D:\AI_T_MCP\_tools\mdl.py `
+  "https://modelscope.cn/models/black-forest-labs/FLUX.1-schnell/resolve/master" `
+  "D:\ai_models\flux-schnell" "D:\AI_T_MCP\_tools\flux_manifest.txt" 20
+
+# 抠图模型 u2net（离线，rembg 会读 U2NET_HOME 指向的 MODEL_ROOT\rembg）
+D:\AI_T_MCP\.venv312\Scripts\python.exe D:\AI_T_MCP\_tools\pdl.py `
+  "https://modelscope.cn/models/AI-ModelScope/u2net/resolve/master/u2net.onnx" `
+  "D:\ai_models\rembg\u2net.onnx" 8
+```
+
+`mdl.py` / `pdl.py` 都在 `_tools\`：前者按清单批量多线程下整个模型目录，后者单文件多线程分段下。
+断点续传靠"文件大小 + 抽样非零窗口"校验（单线程 curl 在这台机器上只有 400 KB/s，
+16–20 线程能到 9 MB/s，2.86 GB 的 torch 和 31.4 GB 的 FLUX 都靠它才下得动）。
+
+### 12.4 验证（四条，全过才算装好）
+
+```powershell
+cd D:\AI_T_MCP
+D:\AI_T_MCP\.venv312\Scripts\python.exe check_env.py                 # 期望 FAIL 0 项
+D:\AI_T_MCP\.venv312\Scripts\python.exe -c "import torch;print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+D:\AI_T_MCP\.venv312\Scripts\python.exe -m unittest discover -s tests  # 期望 25/25 OK
+D:\AI_T_MCP\tools\ffmpeg\bin\ffmpeg.exe -hide_banner -encoders | findstr nvenc
+```
+
+本机实测结果：
+
+```
+Python 3.12.10 64-bit          OK
+torch 2.9.1+cu128              cuda True / NVIDIA GeForce RTX 5060 Ti / 15.9 GB / bf16 True
+ffmpeg N-128691 (2026-11-08)   h264_nvenc / hevc_nvenc / av1_nvenc / h264_amf / hevc_amf / libx264 真编全通过
+check_env.py                   FAIL 0 项，WARN 2 项（videotoolbox 不适用、Qwen3 剧本模型未下）
+单元测试                        25/25 OK
+```
+
+### 12.5 网络坑（本机实测，别踩第二遍）
+
+| 目标 | 结果 |
+|---|---|
+| `python.org` 直连 | HEAD 200，但下到 2 MB 就 `SEC_E_DECRYPT_FAILURE` → 换华为云镜像 |
+| `download.pytorch.org` 直连 | 12 s 超时 / TLS `DECRYPTION_FAILED_OR_BAD_RECORD_MAC` → 换阿里云 `pytorch-wheels` |
+| `huggingface.co` | 直连超时；FLUX 还是 gated 仓库，匿名 403 → 换 ModelScope |
+| `www.gyan.dev` 的 ffmpeg | 12 KB/s，两小时下不完 → 换 `gh-proxy.com` 拉 BtbN 的 GPL 构建 |
+| `ghproxy.net` / `hub.gitmirror.com` | 6 KB/s 超时 / DNS 失败 |
+| `mirrors.aliyun.com/pytorch-wheels/cu128/` | 单线程 400 KB/s，16 线程 9 MB/s（可用） |
+| `mirrors.tuna.tsinghua.edu.cn` | pip 主源，稳定 |
+| `modelscope.cn` | 单线程 400 KB/s，多线程 9 MB/s（可用） |
+
+### 12.6 FLUX 在 16 GB 显存上怎么跑
+
+FLUX.1-schnell 是 12B 参数，bf16 约 24 GB，**装不进 15.9 GB 显存**。
+`ai_draw.py::_load_torch_pipe()` 检测到显存 < 24 GB 时会自动
+`pipe.enable_model_cpu_offload()`：权重留在内存，按需换入显存。
+出来一张 1024×1024 约几十秒，能跑但不快；想更快就换 fp8/GGUF 量化版。
