@@ -3,6 +3,29 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 2026-11-08
+
+### Changed
+
+- **授权模型改为双许可**：源代码可采用 **GNU AGPL-3.0-only**（`LICENSE`）或**商业许可**（`COMMERCIAL-LICENSE.md`），二选一。SPDX 表达式统一为 `AGPL-3.0-only OR LicenseRef-Commercial`。
+- `LICENSE` 换为 AGPL-3.0 官方全文（34,523 字节，`https://www.gnu.org/licenses/agpl-3.0.txt` 原样落盘，未改一字）。
+- 原 Apache-2.0 全文移至 `LICENSES/Apache-2.0.txt`，仅用于 v1.0.0–v1.0.1 历史版本（该授权不可撤回）。
+- 全部 10 个源文件（9 个模块 + `tests/test_script_parser.py`）头部注释改写：SPDX 行、Apache 样板段换成「双许可 + AGPL 第 13 条提示」。
+- `README.md` 顶部许可行、§9、§10 表格同步为三层授权结构（双许可 / EULA / 历史 Apache）。
+
+### Added
+
+- `LICENSING.md`：双许可选型说明 + 8 条 FAQ（单机自用、发视频、内网部署、闭源集成、只改剧本、fork、输出内容归属、能否换许可）。
+- `COMMERCIAL-LICENSE.md`：可签署的商业许可协议模板（14 条，含授权范围、限制、费用栏位、输出内容责任、补偿、期限与终止）。
+- `LICENSES/AGPL-3.0.txt`：AGPL-3.0 官方文本留档。
+
+### Docs
+
+- `NOTICE`：改为双语双许可声明 + 历史 Apache 授权说明。
+- `EULA.md` 升版至 **v1.1**：第 8 条重写为「双许可 / 与 AGPL 的边界 / 商业许可优先 / 历史版本」四款。
+
+> 为什么不采用「Apache-2.0 + 商业」双许可：Apache 已允许商用与闭源，再卖商业许可没有商业意义；双许可的价值来自 copyleft（详见 `LICENSING.md` 第 4 节）。
+
 ## [1.0.1] - 2026-11-08
 
 ### Added

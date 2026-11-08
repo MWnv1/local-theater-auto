@@ -1,9 +1,22 @@
 local-theater-auto（本地图文小剧场自动化）
 Copyright 2026 MWnv1
 
-This product is licensed under the Apache License, Version 2.0.
-Full license text: see the LICENSE file in this directory,
-or http://www.apache.org/licenses/LICENSE-2.0
+DUAL LICENSE        : Source code is available under EITHER
+                        (1) GNU Affero General Public License v3.0 only
+                            - full text: LICENSE
+                        (2) a commercial license from the author
+                            - terms: COMMERCIAL-LICENSE.md
+                      Choose exactly one; see LICENSING.md.
+                      SPDX: AGPL-3.0-only OR LicenseRef-Commercial
+                      Under the AGPL path, distributing this software or
+                      exposing it as a network service requires offering users
+                      the complete corresponding source of your modified
+                      version (AGPL section 13).
+
+HISTORIC LICENSE    : Versions v1.0.0-v1.0.1 (up to commit d5cba6c) were
+                      released under the Apache License, Version 2.0
+                      (LICENSES/Apache-2.0.txt). That grant is irrevocable and
+                      remains in force for copies already obtained.
 
 Author / Maintainer : MWnv1
 GitHub              : https://github.com/MWnv1
@@ -16,9 +29,9 @@ Timestamp (UTC)     : 2026-11-07T01:31:28Z
 Timestamp (Unix)    : 1794015088
 
 EULA                : See the EULA.md file in this directory.
-                      The source code is Apache-2.0; official releases,
-                      model weights, branding and attribution are additionally
-                      governed by EULA.md (effective 2026-11-08).
+                      Official releases, model weights, branding and
+                      attribution are governed by EULA.md (v1.1, effective
+                      2026-11-08) in addition to the license above.
                       All content generated with this software is unrelated to
                       and unmonitored by the author; responsibility for any
                       generated output, including infringement of portrait,

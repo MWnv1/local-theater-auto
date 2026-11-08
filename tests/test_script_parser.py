@@ -1,5 +1,6 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 # Copyright 2026 MWnv1 (GitHub: https://github.com/MWnv1)
+# Dual-licensed: GNU AGPL-3.0-only (LICENSE) or commercial (COMMERCIAL-LICENSE.md)
 """剧本解析的单元测试（纯标准库，无需安装任何依赖）。
 
 运行：

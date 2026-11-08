@@ -1,6 +1,6 @@
 # Copyright 2026 MWnv1 (GitHub: https://github.com/MWnv1)
 # Websites: https://imworkingnow.cc.cd | https://imwn.cc.cd | https://imwn.dpdns.org
-# Apache-2.0 | Generated: 2026-11-07 09:31:28 +08:00
+# AGPL-3.0-only OR Commercial | Generated: 2026-11-07 09:31:28 +08:00
 # 以 # 开头的行会被解析器忽略，可安全当作剧本注释
 
 【镜头1】机房，夜里，机柜风扇声很吵

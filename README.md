@@ -2,7 +2,7 @@
 
 > Copyright 2026 **MWnv1**（GitHub: https://github.com/MWnv1）
 > 个人站点：https://imworkingnow.cc.cd ｜ https://imwn.cc.cd ｜ https://imwn.dpdns.org
-> 许可：**Apache License 2.0**（见 `LICENSE`、`NOTICE`）
+> 许可：**AGPL-3.0-only 或 商业许可（双许可，二选一）**（见 `LICENSE`、`LICENSING.md`、`COMMERCIAL-LICENSE.md`）
 > 版本生成时间：**2026-11-07 09:31:28 +08:00**（Asia/Shanghai / UTC 2026-11-07T01:31:28Z / Unix 1794015088）
 
 剧本 → 背景与角色立绘 → 台词配音 → 镜头画面（含字幕）→ 成片，全本地离线运行，
@@ -158,24 +158,32 @@ python pipeline_full.py --requirement "两个程序员在机房聊本地AI小剧
 ```
 Copyright 2026 MWnv1 (GitHub: https://github.com/MWnv1)
 Websites: https://imworkingnow.cc.cd | https://imwn.cc.cd | https://imwn.dpdns.org
-License:  Apache License, Version 2.0  (SPDX: Apache-2.0)
+License:  AGPL-3.0-only  OR  Commercial License  (choose one)
+SPDX:     AGPL-3.0-only OR LicenseRef-Commercial
 ```
 
-- `LICENSE`：Apache-2.0 官方全文（未做任何删改）
+- `LICENSE`：GNU AGPL-3.0 官方全文（`https://www.gnu.org/licenses/agpl-3.0.txt`，未做任何删改）
+- `LICENSING.md`：双许可说明与选型 FAQ（什么情况必须买商业许可）
+- `COMMERCIAL-LICENSE.md`：商业许可协议模板（可签署）
+- `LICENSES/Apache-2.0.txt`：历史版本（v1.0.0–v1.0.1）所用 Apache-2.0 全文，**该授权不可撤回**
 - `NOTICE`：署名、站点、生成时间戳与第三方组件许可清单
-- 每个 `.py` 文件头部均带 `SPDX-License-Identifier: Apache-2.0` + 版权/署名/站点/时间戳注释块
-- 再分发时按 Apache-2.0 第 4 条：保留 LICENSE 与 NOTICE，修改过的文件需标注"已修改"
+- 每个 `.py` 文件头部均带 `SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial` + 版权/署名/站点/时间戳注释块
+- 走 AGPL 通道时：分发本软件、或把它作为网络服务对外开放，都必须向使用者提供你修改版本的完整对应源码（AGPL 第 13 条）
 
 > 提示：`script.txt` 顶部那几行 `#` 注释会被解析器自动跳过，不影响剧本解析。
 
 ## 10. 最终用户许可协议（EULA）
 
-见 [`EULA.md`](EULA.md)。两层授权，边界如下：
+见 [`EULA.md`](EULA.md)。授权分三层，边界如下：
 
 | 对象 | 适用条款 |
 |---|---|
-| 源代码 | Apache License 2.0（`LICENSE`）——可自由使用、修改、商用、再分发 |
+| 源代码 | **AGPL-3.0-only**（社区版，`LICENSE`）**或** 商业许可（`COMMERCIAL-LICENSE.md`），二选一 |
 | 官方发行物 / 模型权重 / 品牌素材 / 署名 | EULA（`EULA.md`）——不得单独抽取再分发、不得去除署名、不得作为付费服务转售 |
+| 历史版本（v1.0.0–v1.0.1） | Apache-2.0（`LICENSES/Apache-2.0.txt`），不可撤回 |
+
+**双许可怎么选**：个人自用、发视频、内部部署 → 直接按 AGPL-3.0 用，无额外义务；
+闭源集成、私有化交付给客户、对外做 SaaS → 买商业许可。详细判定见 [`LICENSING.md`](LICENSING.md)。
 
 **关于输出内容（EULA 第 4 条）**：本软件是通用本地工具，不含任何真实人物形象或他人素材。
 你生成的一切内容与作者无关；由此产生的一切后果（含侵犯他人**肖像权、声音权、名誉权、

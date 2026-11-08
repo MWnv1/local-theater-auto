@@ -1,21 +1,16 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 #
 # Copyright 2026 MWnv1 (GitHub: https://github.com/MWnv1)
 # Project: local-theater-auto
 # Websites: https://imworkingnow.cc.cd | https://imwn.cc.cd | https://imwn.dpdns.org
 # Generated: 2026-11-07 09:31:28 +08:00 (Asia/Shanghai) [UTC 2026-11-07T01:31:28Z]
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Dual-licensed - choose exactly one:
+#   (1) GNU AGPL-3.0-only  -> see LICENSE
+#   (2) Commercial license -> see COMMERCIAL-LICENSE.md
+# Decide with LICENSING.md. Under the AGPL-3.0 path, redistributing this
+# software or exposing it as a network service obliges you to offer all users
+# the complete corresponding source of your modified version (AGPL section 13).
 
 """一站式流水线：剧本 → 素材 → 配音 → 画面 → 成片。
 
