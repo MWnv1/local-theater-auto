@@ -344,7 +344,7 @@ Move-Item D:\AI_T_MCP\tools\ffmpeg_tmp\ffmpeg-master-latest-win64-gpl D:\AI_T_MC
 # HF 那个仓库需要登录，国内用 ModelScope 的镜像更快更省事
 D:\AI_T_MCP\.venv312\Scripts\python.exe D:\AI_T_MCP\_tools\mdl.py `
   "https://modelscope.cn/models/black-forest-labs/FLUX.1-schnell/resolve/master" `
-  "D:\ai_models\flux-schnell" "D:\AI_T_MCP\_tools\flux_manifest.txt" 20
+  "D:\ai_models\flux-schnell" "D:\AI_T_MCP\_tools\flux_manifest.txt" 20 --verify
 
 # 抠图模型 u2net（离线，rembg 会读 U2NET_HOME 指向的 MODEL_ROOT\rembg）
 D:\AI_T_MCP\.venv312\Scripts\python.exe D:\AI_T_MCP\_tools\pdl.py `
@@ -353,8 +353,11 @@ D:\AI_T_MCP\.venv312\Scripts\python.exe D:\AI_T_MCP\_tools\pdl.py `
 ```
 
 `mdl.py` / `pdl.py` 都在 `_tools\`：前者按清单批量多线程下整个模型目录，后者单文件多线程分段下。
-断点续传靠"文件大小 + 抽样非零窗口"校验（单线程 curl 在这台机器上只有 400 KB/s，
-16–20 线程能到 9 MB/s，2.86 GB 的 torch 和 31.4 GB 的 FLUX 都靠它才下得动）。
+断点续传看 `D:\ai_models\flux-schnell\.mdl_state.txt`（每下完一块追加一行 `路径:块号`），
+**只有状态里记过的块才跳过，不看文件大小**——多线程下载会先把文件 truncate 到满尺寸，
+按大小判断会把零填充的空壳当成"已下完"，直到 safetensors 加载才炸。
+`--verify` 会在下完后逐块统计全零块占比，任一文件 < 99% 就输出 `VERIFY FAILED`。
+单线程 curl 在这台机器上只有 400 KB/s，16–20 线程能到 9 MB/s，2.86 GB 的 torch 和 31.4 GB 的 FLUX 都靠它才下得动。
 
 ### 12.4 验证（四条，全过才算装好）
 
@@ -391,7 +394,45 @@ check_env.py                   FAIL 0 项，WARN 2 项（videotoolbox 不适用�
 
 ### 12.6 FLUX 在 16 GB 显存上怎么跑
 
-FLUX.1-schnell 是 12B 参数，bf16 约 24 GB，**装不进 15.9 GB 显存**。
-`ai_draw.py::_load_torch_pipe()` 检测到显存 < 24 GB 时会自动
-`pipe.enable_model_cpu_offload()`：权重留在内存，按需换入显存。
-出来一张 1024×1024 约几十秒，能跑但不快；想更快就换 fp8/GGUF 量化版。
+FLUX.1-schnell 是 12B 参数，bf16 约 24 GB，**装不进 15.9 GB 显存**，必须 offload。
+
+`ai_draw.py::_load_torch_pipe()` 的策略：
+
+| `FLUX_OFFLOAD` | 行为 | 本机（RTX 5060 Ti 16G，torch 2.9.1+cu128 / Windows） |
+|---|---|---|
+| `auto`（默认） | 显存 ≥24 GB 时全量驻留，否则 `enable_sequential_cpu_offload()` | 走 sequential |
+| `sequential` | 逐层换入显存 | **可用**：1024×1024 ≈ 25 分钟，512×512 ≈ 6 分钟 |
+| `model` | `enable_model_cpu_offload()`，整套子模型换入 | **崩**：推理第一步 `0xC0000005` 访问冲突 |
+| `none` | `pipe.to(cuda)` 全量驻留 | 16 GB 装不下，会 OOM |
+
+即：这台机器上只有 `sequential` 能真正出图。`enable_model_cpu_offload()` 在
+Windows + accelerate 1.15 + torch 2.9.x 组合下会直接让进程挂掉，
+所以默认不再走它（代码里保留开关，方便你在别的卡/别的 torch 版本上试）。
+
+提速办法（按性价比）：`DRAW_SIZE=512`（4 倍速）→ 换 fp8 / GGUF 量化权重（能全量驻留，最快）→
+调低 `DRAW_STEPS`（schnell 本来 4 步，不建议再降）。
+
+冒烟脚本 `_tools/probe_flux.py` 可以按模式逐个复验（每种模式跑在独立进程，崩了不影响其它）：
+
+```powershell
+$env:PROBE_SIZE="512"
+D:\AI_T_MCP\.venv312\Scripts\python.exe D:\AI_T_MCP\_tools\probe_flux.py bf16_seq
+```
+
+### 12.7 依赖版本的隐形地雷（本机踩过，务必按顺序锁）
+
+`optimum-intel` / `diffusers` / `transformers` / `huggingface_hub` 四个包的版本约束会互相锁死：
+
+| 组合 | 结果 |
+|---|---|
+| `diffusers 0.42.1`（要 hub≥1.32） + `optimum-intel 2.2.0`（要 hub<1.22） | 无解，`from huggingface_hub import resolve_revision` 直接 ImportError |
+| `transformers 5.5.4`（要 hub 1.5–2.0） + `optimum-intel 2.2.0`（要 hub<1.22） | 无解 |
+| **实际可用**：hub 0.36.2 + transformers 4.57.6 + diffusers 0.39.0 + optimum-intel 2.2.0 | 全链路 import 通过 |
+| CPU 版 torchvision ↔ CUDA 版 torch | `operator torchvision::nms does not exist` → CLIPImageProcessor 导入失败 |
+
+所以两条硬规则：
+
+1. **torch 和 torchvision 必须同版本同 CUDA 变体**（cu128 配 `torchvision==0.24.1+cu128`），
+   否则 `torchvision::nms` 缺失，`transformers` 一导入 CLIP 组件就崩；
+2. T5 tokenizer 需要 `sentencepiece`，不装会报
+   `Cannot instantiate this tokenizer from a slow version`。

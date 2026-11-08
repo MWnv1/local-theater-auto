@@ -154,15 +154,20 @@ def _load_torch_pipe(device: str, model_dir: Optional[str] = None):
     注意：INT4 的 OpenVINO 模型（含 .xml/.bin）不能给 torch 用，
     这里要求目录里是 HuggingFace 格式权重（model_index.json）。
 
-    显存策略：FLUX.1-schnell 是 12B 参数，bf16 约 24GB，16G 显存装不下，
-    因此 CUDA 下显存不足 24GB 时自动 `enable_model_cpu_offload()`；
-    还不够就退到 sequential offload（更慢但一定能跑）。
+    显存策略：FLUX.1-schnell 是 12B 参数，bf16 约 24GB，16G 显存装不下。
+
+    实测（RTX 5060 Ti 16G + torch 2.9.1+cu128 + accelerate 1.15 + Windows）：
+      enable_model_cpu_offload()       -> 推理第一步直接 0xC0000005 访问冲突（进程崩）
+      enable_sequential_cpu_offload()  -> 正常出图，1024×1024 约 25 分钟，512×512 约 6 分钟
+    所以显存不足时默认走 **sequential**（慢但确定能跑）；想让整层换入换出（更快但本机崩）
+    就设 `FLUX_OFFLOAD=model`，显存够大想全量驻留就设 `FLUX_OFFLOAD=none`。
     """
     import torch
     from diffusers import DiffusionPipeline
 
     target = model_dir or TORCH_MODEL_DIR
     dev = (device or "").strip().lower()
+    offload_mode = os.environ.get("FLUX_OFFLOAD", "auto").strip().lower()
 
     if dev == "dml":
         import torch_directml as dml  # type: ignore
@@ -187,21 +192,32 @@ def _load_torch_pipe(device: str, model_dir: Optional[str] = None):
         target, torch_dtype=dtype, local_files_only=True
     )
 
-    if torch_dev == "cpu":
-        print("[warn] 绘图跑在 CPU 上，1024×1024 一张可能要几十秒")
-        pipe.to("cpu")
+    if torch_dev == "cpu" or offload_mode == "none":
+        print("[warn] 全量驻留（或 CPU 推理），12B 模型需要 ≥24GB 显存/内存")
+        pipe.to(torch_dev)
         return pipe
 
-    if torch_dev != "dml" and hasattr(torch, "cuda"):
+    if offload_mode in ("model", "sequential"):
+        mode = offload_mode
+    else:
         try:
             total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
         except Exception:
             total = 0
-        if total and total < 24:
-            print(f"[info] 显存 {total:.1f} GB < 24 GB，启用 model_cpu_offload")
-            pipe.enable_model_cpu_offload()
-            return pipe
-    pipe.to(torch_dev)
+        # 显存 ≥24GB 才有资格谈"全量驻留"，否则只能 offload
+        mode = "none" if total and total >= 24 else "sequential"
+
+    if mode == "none":
+        pipe.to(torch_dev)
+        return pipe
+    if mode == "model":
+        print("[info] FLUX_OFFLOAD=model：整层换入换出（本机实测会崩，仅在你确认能跑时用）")
+        pipe.enable_model_cpu_offload()
+        return pipe
+
+    print("[info] 启用 sequential offload（逐层换入，慢但稳）"
+          "；想更快可设 DRAW_SIZE=512 或换 fp8/量化权重")
+    pipe.enable_sequential_cpu_offload()
     return pipe
 
 
@@ -220,19 +236,39 @@ def _run_prompt(prompt: str):
 # ---------------------------------------------------------------------------
 # 抠图
 # ---------------------------------------------------------------------------
+_rembg_session = None
+
+
+def _get_rembg_session():
+    """取一个**指定 u2net** 的 rembg session（全局只建一次）。
+
+    rembg 2.x 的 `remove()` 默认模型不是 u2net（新版默认 birefnet-general，约 1 GB），
+    不显式指定就会触发联网下载，既破坏"全本地离线"，也会把模型塞到默认目录。
+    这里固定用 u2net，且在 import 前把 U2NET_HOME 钉在 MODEL_ROOT/rembg。
+    """
+    global _rembg_session
+    if _rembg_session is not None:
+        return _rembg_session
+
+    from rembg import new_session
+
+    model_dir = os.path.join(MODEL_ROOT, "rembg")
+    os.environ["U2NET_HOME"] = model_dir  # 必须在 new_session 之前生效
+    if not os.path.exists(os.path.join(model_dir, "u2net.onnx")):
+        raise FileNotFoundError(f"u2net.onnx 缺失：{model_dir}")
+
+    _rembg_session = new_session("u2net")
+    return _rembg_session
+
+
 def _cutout_offline(img_path: str, out_path: str) -> str:
     """rembg 离线抠图；模型缺失时降级为白底连通域抠图。"""
     try:
-        os.environ.setdefault("U2NET_HOME", os.path.join(MODEL_ROOT, "rembg"))
-        model_file = os.path.join(os.environ["U2NET_HOME"], "u2net.onnx")
-        if not os.path.exists(model_file):
-            raise FileNotFoundError("u2net.onnx 缺失")
-
         from rembg import remove  # 延迟导入
         from PIL import Image
 
         src = Image.open(img_path)
-        out = remove(src)
+        out = remove(src, session=_get_rembg_session())
         out.save(out_path, "PNG")
         return out_path
     except Exception:
@@ -298,7 +334,13 @@ def generate_scene_assets(script_struct: dict, force: bool = False) -> Dict:
           "model_dir": 使用的绘图模型目录
         }
     """
-    assets: Dict = {"background": "", "backgrounds": {}, "characters": {}, "model_dir": DRAW_MODEL_DIR}
+    # 报回"实际用到的"模型目录（torch 与 OpenVINO 是两套目录，别混）
+    try:
+        _backend = resolve_backend()
+        used_dir = TORCH_MODEL_DIR if _backend["backend"] == "torch" else DRAW_MODEL_DIR
+    except Exception:
+        used_dir = DRAW_MODEL_DIR
+    assets: Dict = {"background": "", "backgrounds": {}, "characters": {}, "model_dir": used_dir}
 
     # 通用背景
     bg_prompt = os.environ.get(

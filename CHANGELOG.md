@@ -21,8 +21,13 @@
 ### Changed
 
 - `theater/ai_draw.py`：`_load_torch_pipe()` 现在按后端取模型目录；CUDA 下用 `bfloat16`
-  （原 `float16`）；显存 < 24 GB 时自动 `enable_model_cpu_offload()`（FLUX 12B 塞不进 16 GB 显存）；
-  目录缺 `model_index.json` 时给出"这不是 diffusers 目录"的明确报错。
+  （原 `float16`）；显存 < 24 GB 时**默认 sequential offload**（按本机实测，`model_cpu_offload`
+  会让进程直接崩，见下）；目录缺 `model_index.json` 时给出"这不是 diffusers 目录"的明确报错。
+- `theater/ai_draw.py`：抠图改为**显式 `new_session("u2net")`**。rembg 2.x 的 `remove()`
+  默认模型已换成 birefnet（约 1 GB），不指定就会联网下载，既破坏离线也会写到默认目录；
+  现在 `U2NET_HOME` 钉在 `MODEL_ROOT/rembg` 并只认本地 `u2net.onnx`，缺文件直接降级白底抠图。
+- `theater/ai_draw.py`：`generate_scene_assets()` 返回的 `model_dir` 改为**实际生效的后端目录**
+  （torch 报 `flux-schnell`，OpenVINO 才报 `flux-schnell-int4-ov`），不再写死 OpenVINO 路径。
 - `check_env.py`：
   - **修 bug**：NVENC 真编测试原来用 `64x64` 黑场，NVENC 有最小帧尺寸限制，会报
     `Frame Dimension less than the minimum supported value`，把能用的编码器误判成不可用；
@@ -34,9 +39,16 @@
 ### Verified
 
 - `check_env.py`：FAIL 0 项（WARN 2 项为 videotoolbox 不适用、Qwen3 剧本模型未下）。
-- `torch 2.9.1+cu128` + `torch.cuda.is_available() == True`，RTX 5060 Ti / 15.9 GB / bf16 支持。
+- `torch 2.9.1+cu128` + `torch.cuda.is_available() == True`，RTX 5060 Ti / 15.9 GB / bf16 支持；
+  bf16 matmul / conv / SDPA 三个基础 kernel 在 GPU 上真跑通过。
 - ffmpeg `N-128691`（2026-11-08，BtbN GPL 构建）：`h264_nvenc` / `hevc_nvenc` / `av1_nvenc` /
   `h264_amf` / `hevc_amf` / `libx264` 六种编码器**真编**通过。
+- **FLUX 真出图**（`torch` / `cuda` / `bfloat16` / sequential offload）：1024×1024 一张 1504 s，
+  512×512 一张约 21 分钟；`enable_model_cpu_offload()` 在本机 **推理第一步即 `0xC0000005`**，
+  因此默认改走 sequential。
+- **抠图真跑**：u2net 离线抠图 512×512 用时 21.5 s，输出 RGBA，透明像素 82.7%。
+- **成片真出**：背景+角色合帧 1920×1080 → `h264_nvenc` + AAC 成片（demo 2.53 s / 215 KB），
+  另一条三镜头 demo 11.51 s / 403 KB。
 - 单元测试 25/25 通过。
 
 ## [1.2.0] - 2026-11-08
