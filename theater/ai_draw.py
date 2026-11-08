@@ -12,30 +12,36 @@
 # software or exposing it as a network service obliges you to offer all users
 # the complete corresponding source of your modified version (AGPL section 13).
 
-"""AI 绘图 + 本地抠图（OpenVINO / Intel 核显版）。
+"""AI 绘图 + 本地抠图（OpenVINO / PyTorch 双后端，NVIDIA / AMD / Intel 通用）。
 
-架构保持原设计：optimum-intel + OpenVINO 在核显(GPU)上跑 Flux Schnell INT4。
-本文件修复的问题：
-1. 模型改为**首次调用时懒加载**，import 本模块不再直接吃掉几 GB 内存/几十秒；
-   并加线程锁，避免 MCP 并发请求同时进同一个 pipeline。
-2. FLUX 用 `OVFluxPipeline` 加载（optimum-intel 新版本才有），旧环境回退
-   `OVStableDiffusionPipeline`，并在两者都不支持时抛出可读错误。
-3. rembg 明确走离线：先设 `U2NET_HOME` 到 MODEL_ROOT/rembg，模型缺失时
-   **不联网下载**，自动降级为"白底连通域抠图"（prompt 里已要求白底）。
-4. 角色名进文件名前统一 `safe_name()`，杜绝中文/特殊字符导致的非法路径与碰撞。
-5. 已生成过的资源默认跳过（缓存命中），需要重画时传 force=True。
+后端选择（`DRAW_BACKEND=auto` 时自动判定，见 `theater/hardware.py`）：
+    NVIDIA + torch          -> torch / cuda      （最快）
+    AMD + torch-directml    -> torch / dml       （Windows 上的 AMD 加速路径）
+    Intel（核显 / Arc）     -> openvino / GPU
+    其他                    -> openvino / CPU    （任何平台都能跑，只是慢）
+
+原有修复仍然保留：
+1. 模型**首次调用时懒加载**，import 本模块不吃内存；线程锁防并发重入。
+2. FLUX 优先 `OVFluxPipeline`，旧版 optimum-intel 回退 `OVStableDiffusionPipeline`。
+3. rembg 走离线：`U2NET_HOME` 指向 MODEL_ROOT/rembg，缺模型时不联网，
+   降级为"白底连通域抠图"（prompt 里已要求白底）。
+4. 角色名进文件名前统一 `safe_name()`。
+5. 已生成的资源默认跳过（缓存命中），force=True 可重画。
 """
 
 import os
 import threading
 from typing import Dict, Optional
 
-from . import MODEL_ROOT, subdir, safe_name, text_key
+from . import MODEL_ROOT, subdir, safe_name, text_key, hardware
 
 DRAW_MODEL_DIR = os.environ.get(
     "DRAW_MODEL_DIR", os.path.join(MODEL_ROOT, "flux-schnell-int4-ov")
 )
-DRAW_DEVICE = os.environ.get("DRAW_DEVICE", "GPU")          # GPU / CPU / AUTO
+# auto / openvino / torch；auto 时按显卡厂商自动选（见 hardware.pick_draw_backend）
+DRAW_BACKEND = os.environ.get("DRAW_BACKEND", "auto")
+# auto / GPU / CPU / NPU（仅 OpenVINO 有意义）；auto 时 Intel 走 GPU、其余走 CPU
+DRAW_DEVICE = os.environ.get("DRAW_DEVICE", "auto")
 DRAW_STEPS = int(os.environ.get("DRAW_STEPS", "4"))
 DRAW_SIZE = int(os.environ.get("DRAW_SIZE", "1024"))
 
@@ -46,10 +52,55 @@ _gen_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
+# 后端判定
+# ---------------------------------------------------------------------------
+def _has_module(name: str) -> bool:
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec(name) is not None
+    except Exception:
+        return False
+
+
+def resolve_backend() -> Dict[str, str]:
+    """返回 {"backend": "openvino"/"torch", "device": ..., "reason": ...}。"""
+    forced = (DRAW_BACKEND or "auto").strip().lower()
+    vendor = hardware.primary_vendor()
+
+    if forced in ("openvino", "torch"):
+        if forced == "openvino":
+            dev = hardware.suggest_openvino_device(vendor, DRAW_DEVICE)
+            return {"backend": "openvino", "device": dev, "reason": "DRAW_BACKEND 显式指定"}
+        return {"backend": "torch", "device": DRAW_DEVICE if DRAW_DEVICE != "auto" else "cuda",
+                "reason": "DRAW_BACKEND 显式指定"}
+
+    avail = {
+        "openvino": _has_module("optimum.intel.openvino") or _has_module("openvino"),
+        "torch": _has_module("torch") and _has_module("diffusers"),
+        "directml": _has_module("torch_directml"),
+    }
+    picked = hardware.pick_draw_backend(vendor, avail, os.name == "nt")
+    if not picked["backend"]:
+        raise RuntimeError(
+            "没有可用的绘图后端。请在项目 venv 里安装其中之一：\n"
+            "  Intel/纯 CPU : pip install openvino optimum[openvino]\n"
+            "  NVIDIA       : pip install torch diffusers --index-url https://download.pytorch.org/whl/cu124\n"
+            "  AMD (Windows): pip install torch torch-directml diffusers\n"
+            f"（检测到的显卡：{hardware.list_adapters() or '未识别'} / 厂商 {vendor}）"
+        )
+    if picked["backend"] == "openvino":
+        picked["device"] = hardware.suggest_openvino_device(vendor, DRAW_DEVICE)
+    elif DRAW_DEVICE not in ("auto", "", None):
+        picked["device"] = DRAW_DEVICE
+    return picked
+
+
+# ---------------------------------------------------------------------------
 # pipeline 懒加载
 # ---------------------------------------------------------------------------
 def get_pipe(device: Optional[str] = None):
-    """按需加载 OpenVINO 扩散 pipeline（单例）。"""
+    """按需加载绘图 pipeline（单例，线程安全）。"""
     global _pipe
     with _pipe_lock:
         if _pipe is not None:
@@ -58,27 +109,74 @@ def get_pipe(device: Optional[str] = None):
         if not os.path.isdir(DRAW_MODEL_DIR) or not os.listdir(DRAW_MODEL_DIR):
             raise RuntimeError(
                 f"绘图模型目录不存在或为空：{DRAW_MODEL_DIR}\n"
-                "请先把 Flux Schnell INT4 OpenVINO 模型包解压到该目录（见 README）。"
+                "请先把模型包解压到该目录。\n"
+                "  Intel/CPU : Flux Schnell INT4 OpenVINO 模型\n"
+                "  NVIDIA/AMD: FLUX.1-schnell 的 PyTorch 权重（DRAW_BACKEND=torch）\n"
+                "详见 README 第 11 节「显卡适配」。"
             )
 
-        from optimum.intel.openvino import OVStableDiffusionPipeline  # 延迟导入
-
-        pipe_cls = OVStableDiffusionPipeline
-        try:
-            from optimum.intel.openvino import OVFluxPipeline  # type: ignore
-
-            pipe_cls = OVFluxPipeline
-        except Exception:
-            # 旧版 optimum-intel 没有 Flux 专用 pipeline
-            pipe_cls = OVStableDiffusionPipeline
-
-        kwargs = {"compile": True, "ov_config": {"CACHE_DIR": os.path.join(_ASSET_DIR, "ov_cache")}}
-        dev = device or DRAW_DEVICE
-        if dev and dev.upper() != "AUTO":
-            kwargs["device"] = dev
-
-        _pipe = pipe_cls.from_pretrained(DRAW_MODEL_DIR, **kwargs)
+        info = resolve_backend()
+        if info["backend"] == "torch":
+            _pipe = _load_torch_pipe(device or info["device"])
+        else:
+            _pipe = _load_openvino_pipe(device or info["device"])
         return _pipe
+
+
+def _load_openvino_pipe(device: str):
+    """optimum-intel + OpenVINO。Intel GPU / 任何平台 CPU。"""
+    from optimum.intel.openvino import OVStableDiffusionPipeline  # 延迟导入
+
+    pipe_cls = OVStableDiffusionPipeline
+    try:
+        from optimum.intel.openvino import OVFluxPipeline  # type: ignore
+
+        pipe_cls = OVFluxPipeline
+    except Exception:
+        # 旧版 optimum-intel 没有 Flux 专用 pipeline
+        pipe_cls = OVStableDiffusionPipeline
+
+    kwargs = {"compile": True, "ov_config": {"CACHE_DIR": os.path.join(_ASSET_DIR, "ov_cache")}}
+    dev = (device or "").strip()
+    if dev and dev.upper() != "AUTO":
+        kwargs["device"] = dev
+    return pipe_cls.from_pretrained(DRAW_MODEL_DIR, **kwargs)
+
+
+def _load_torch_pipe(device: str):
+    """diffusers + PyTorch。NVIDIA 走 CUDA，AMD 走 DirectML，兜底 CPU。
+
+    注意：INT4 的 OpenVINO 模型（含 .xml/.bin）不能给 torch 用，
+    这里要求目录里是 HuggingFace 格式权重（model_index.json）。
+    """
+    import torch
+    from diffusers import DiffusionPipeline
+
+    dev = (device or "").strip().lower()
+
+    if dev == "dml":
+        import torch_directml as dml  # type: ignore
+
+        torch_dev = dml.device()
+        dtype = torch.float16
+    elif dev == "cuda" and torch.cuda.is_available():
+        torch_dev = "cuda"
+        dtype = torch.float16
+    elif dev.startswith("cuda") and torch.cuda.is_available():
+        torch_dev = dev
+        dtype = torch.float16
+    else:
+        torch_dev = "cpu"
+        dtype = torch.float32
+
+    pipe = DiffusionPipeline.from_pretrained(
+        DRAW_MODEL_DIR, torch_dtype=dtype, local_files_only=True
+    )
+    pipe.to(torch_dev)
+    if torch_dev == "cpu":
+        print("[warn] 绘图跑在 CPU 上，1024×1024 一张可能要几十秒")
+    return pipe
+
 
 
 def _run_prompt(prompt: str):

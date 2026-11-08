@@ -12,19 +12,22 @@
 # software or exposing it as a network service obliges you to offer all users
 # the complete corresponding source of your modified version (AGPL section 13).
 
-"""视频导出（QSV 硬编码 / 可回退）。
+"""视频导出（NVIDIA / AMD / Intel 硬编码 + 软编码兜底）。
+
+编码器选择走 `theater/hardware.py`：按显卡厂商挑 ffmpeg 里真实存在的那个，
+一个都没有就落 `libx264`（永不失败）。
+    NVIDIA -> h264_nvenc  (-rc vbr -cq)
+    AMD    -> h264_amf    (-rc cqp -qp_i/-qp_p)
+    Intel  -> h264_qsv    (-global_quality)
 
 修复的点：
-1. **`h264_qsv` 不认识 `-crf`**（QSV 用 `-global_quality`），原稿的 `-crf 23`
-   会被忽略甚至报错；这里按编码器分别拼参。
-2. 所有 ffmpeg 调用都检查 returncode，失败抛异常并把 stderr 尾部带出来，
-   不再静默产出空文件。
-3. 画面统一 `scale + pad` 到 1920×1080（原先 1024×1024 直接拉伸会变形），
-   并强制 `-pix_fmt yuv420p`、`-r 30`（否则微信/部分播放器打不开）。
-4. 音频拼接改为"解码 → 统一 48kHz/双声道 → 重编码 PCM"，替代对 WAV 做
-   `-c copy`（后者常出现爆音与时长漂移）。
-5. 成片拼接先用 `-c copy`，随后用 ffprobe 校验总时长；对不上自动走重编码兜底。
-6. QSV 不可用时自动回退 `libx264`（并打印告警），不会直接崩。
+1. **三种硬编码器的画质参数完全不同**：`-crf` 只有 x264/x265 认；QSV 要
+   `-global_quality`，NVENC 要 `-cq`，AMF 要 `-qp_i/-qp_p`。原稿统一用 `-crf`
+   在 QSV 上会被忽略/报错，这里按编码器分别拼参。
+2. 所有 ffmpeg 调用都检查 returncode，失败抛异常并把 stderr 尾部带出来。
+3. 画面统一 `scale + pad` 到 1920×1080，强制 `-pix_fmt yuv420p`、`-r 30`。
+4. 音频拼接改为"解码 → 统一 48kHz/双声道 → 重编码 PCM"。
+5. 成片拼接先 `-c copy`，随后 ffprobe 校验时长，对不上自动重编码兜底。
 """
 
 import os
@@ -32,12 +35,16 @@ import re
 import subprocess
 from typing import Dict, List
 
-from . import ffmpeg_path, ffprobe_path, subdir
+from . import ffmpeg_path, ffprobe_path, subdir, hardware
 
 _CLIP_DIR = subdir("video_clips")
 
-VIDEO_ENCODER = os.environ.get("VIDEO_ENCODER", "h264_qsv")
-QSV_QUALITY = os.environ.get("QSV_QUALITY", "23")        # -global_quality，0~51
+# auto = 按显卡厂商自动选；也可以显式写 h264_nvenc / h264_amf / h264_qsv / libx264
+VIDEO_ENCODER = os.environ.get("VIDEO_ENCODER", "auto")
+VIDEO_CODEC = os.environ.get("VIDEO_CODEC", "h264")       # h264 / hevc / av1
+QSV_QUALITY = os.environ.get("QSV_QUALITY", "23")         # -global_quality，0~51
+NVENC_CQ = os.environ.get("NVENC_CQ", "23")               # -cq，0~51
+AMF_QP = os.environ.get("AMF_QP", "22")                   # -qp_i/-qp_p，0~51
 X264_CRF = os.environ.get("X264_CRF", "20")
 FPS = os.environ.get("VIDEO_FPS", "30")
 W = int(os.environ.get("VIDEO_W", "1920"))
@@ -61,18 +68,31 @@ def _ffmpeg_encoders() -> str:
     return _encoders_cache
 
 
+def _quality_for(encoder: str) -> str:
+    """各编码器自己的画质旋钮，默认值见本文件顶部常量。"""
+    enc = (encoder or "").lower()
+    if enc.endswith("_qsv"):
+        return QSV_QUALITY
+    if enc.endswith("_nvenc"):
+        return NVENC_CQ
+    if enc.endswith("_amf"):
+        return AMF_QP
+    return X264_CRF
+
+
 def resolve_encoder(preferred: str = None) -> str:
-    """确认编码器可用，否则按 qsv → libx264 顺序回退。"""
-    pref = preferred or VIDEO_ENCODER
-    available = _ffmpeg_encoders()
-    if pref and pref in available:
-        return pref
-    for cand in ("h264_qsv", "hevc_qsv", "libx264"):
-        if cand in available:
-            if cand != pref:
-                print(f"[warn] 编码器 {pref} 不可用，已回退到 {cand}")
-            return cand
-    return "libx264"
+    """确认编码器可用；不可用时按厂商优先级回退，最终落 libx264。"""
+    pref = VIDEO_ENCODER if preferred is None else preferred
+    avail = _ffmpeg_encoders()
+    vendor = hardware.primary_vendor()
+    enc = hardware.select_encoder(vendor, avail, preferred=pref, codec=VIDEO_CODEC)
+
+    pref_clean = (pref or "").strip()
+    if pref_clean and pref_clean.lower() != "auto" and enc != pref_clean:
+        print(f"[warn] 编码器 {pref_clean} 不可用，已按 {vendor} 平台回退到 {enc}")
+    elif pref_clean.lower() == "auto" and hardware.is_hardware_encoder(enc):
+        print(f"[info] 检测到 {vendor} 显卡，使用硬编码器 {enc}")
+    return enc
 
 
 def _run(cmd: List[str], what: str) -> None:
@@ -145,10 +165,7 @@ def _build_clip(frame_path: str, audio_path: str, duration: float, out_path: str
            "-vf", f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
                   f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1",
            "-c:v", enc]
-    if enc.endswith("_qsv"):
-        cmd += ["-global_quality", QSV_QUALITY, "-preset", "fast"]
-    else:
-        cmd += ["-crf", X264_CRF, "-preset", "veryfast"]
+    cmd += hardware.encoder_quality_args(enc, _quality_for(enc))
     cmd += ["-pix_fmt", "yuv420p", "-r", FPS,
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-t", f"{duration:.3f}", "-shortest", out_path]

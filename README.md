@@ -1,4 +1,4 @@
-# 本地图文小剧场自动化（OpenVINO / Intel 版）
+# 本地图文小剧场自动化（NVIDIA / AMD / Intel 通用）
 
 > Copyright 2026 **MWnv1**（GitHub: https://github.com/MWnv1）
 > 个人站点：https://imworkingnow.cc.cd ｜ https://imwn.cc.cd ｜ https://imwn.dpdns.org
@@ -21,11 +21,12 @@ D:\AI_T_MCP\
 ├─ cache\               # 素材/音频/帧/片段缓存（可删）
 └─ theater\
    ├─ __init__.py       # 路径与公用工具（绝对路径锚定）
+   ├─ hardware.py       # 显卡探测（NVIDIA/AMD/Intel）→ 后端与编码器选型
    ├─ script_parser.py  # 剧本结构化
-   ├─ ai_draw.py        # OpenVINO 绘图 + 离线抠图
+   ├─ ai_draw.py        # 绘图（OpenVINO / PyTorch 双后端）+ 离线抠图
    ├─ local_tts.py      # SAPI5 离线配音
    ├─ frame_compose.py  # 图层合成 + 字幕
-   └─ video_export.py   # QSV/NVENC/libx264 导出
+   └─ video_export.py   # NVENC / AMF / QSV / libx264 导出
 ```
 
 ## 1. 环境
@@ -189,3 +190,76 @@ SPDX:     AGPL-3.0-only OR LicenseRef-Commercial
 你生成的一切内容与作者无关；由此产生的一切后果（含侵犯他人**肖像权、声音权、名誉权、
 著作权、商标权**，或传播违法信息、未按《人工智能生成合成内容标识办法》加标识等），
 **全部由使用者自行承担**，作者不承担直接、连带或补充责任（详见 EULA 第 4、7、9 条）。
+
+## 11. 显卡适配（NVIDIA / AMD / Intel）
+
+代码会自动探测本机显卡，决定**绘图后端**与**视频编码器**，无需手工改参数。
+探测逻辑在 `theater/hardware.py`，纯标准库，探测失败只降级不报错。
+
+### 11.1 自动选型矩阵
+
+| 你的显卡 | 绘图后端（需自行 pip 装） | 视频编码器 | 参数差异 |
+|---|---|---|---|
+| **NVIDIA**（RTX / GTX / Quadro） | `torch` + **CUDA**（最快） | `h264_nvenc`（`hevc_nvenc` / `av1_nvenc`） | `-rc vbr -cq N -b:v 0` |
+| **AMD**（RX 6000/7000、核显） | Windows：`torch` + **DirectML**；Linux：ROCm 版 torch | `h264_amf`（`hevc_amf` / `av1_amf`） | `-rc cqp -qp_i N -qp_p N` |
+| **Intel**（核显 / Arc） | `openvino` + **GPU** | `h264_qsv`（`hevc_qsv` / `av1_qsv`） | `-global_quality N` |
+| 无独显 / 无驱动 / 无 ffmpeg | `openvino` + **CPU** | `libx264` | `-crf N` |
+
+**注意 `-crf` 不是通用的**：原稿给 QSV 传 `-crf` 会被忽略，给 NVENC/AMF 传更是直接报错。
+现在每个编码器的画质旋钮按上表分别拼参（`theater/hardware.py::encoder_quality_args`），
+由单测锁死，见 `tests/test_hardware.py`。
+
+### 11.2 装哪套后端
+
+```bash
+# Intel 核显 / Arc / 纯 CPU（基线，任何平台都能跑）
+pip install openvino openvino-tokenizers "optimum[openvino]" nncf diffusers
+
+# NVIDIA（CUDA 版 PyTorch）
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+
+# AMD（Windows 用 DirectML）
+pip install torch torch-directml
+```
+
+三者都不冲突：装了 torch 又有 NVIDIA → 自动走 cuda；AMD 机器只有 DirectML 可用；
+Intel 机器没有 DirectML 就回 OpenVINO GPU。
+
+### 11.3 模型格式要对上
+
+| 后端 | 模型目录里应该是什么 |
+|---|---|
+| `openvino` | OpenVINO IR（`*.xml` + `*.bin`），如 `flux-schnell-int4-ov` |
+| `torch` | HuggingFace 格式（`model_index.json` + `*.safetensors`），如 `FLUX.1-schnell` |
+
+INT4 的 OpenVINO 模型**不能**给 torch 用，反之亦然。`DRAW_MODEL_DIR` 指向哪个目录，
+就要配对应后端（`DRAW_BACKEND=auto` 时按显卡选，选错会给出明确报错而不是崩）。
+
+### 11.4 环境变量
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `DRAW_BACKEND` | `auto` | `auto` / `openvino` / `torch` |
+| `DRAW_DEVICE` | `auto` | `auto` / `GPU` / `CPU` / `NPU` / `cuda` / `cuda:1` / `dml` |
+| `DRAW_MODEL_DIR` | `$MODEL_ROOT/flux-schnell-int4-ov` | 绘图模型目录 |
+| `VIDEO_ENCODER` | `auto` | `auto` 或强制指定 `h264_nvenc` / `h264_amf` / `h264_qsv` / `libx264` |
+| `VIDEO_CODEC` | `h264` | `h264` / `hevc` / `av1` |
+| `NVENC_CQ` | `23` | NVENC 画质（0–51，越小越好） |
+| `AMF_QP` | `22` | AMF 画质 |
+| `QSV_QUALITY` | `23` | QSV 画质 |
+| `X264_CRF` | `20` | 软编画质 |
+| `GPU_ADAPTERS` | — | 手动覆盖探测结果，如 `NVIDIA GeForce RTX 5060 Ti\|AMD Radeon(TM) Graphics` |
+| `GPU_VENDOR` | — | 只覆盖厂商判定：`nvidia` / `amd` / `intel` |
+
+### 11.5 本机实测（RTX 5060 Ti + Ryzen 5 9600X 核显）
+
+```
+[OK  ] 显卡        NVIDIA GeForce RTX 5060 Ti、AMD Radeon(TM) Graphics
+[OK  ] 主显卡厂商   nvidia
+[FAIL] 绘图后端     未安装 openvino 或 torch，无法绘图
+[FAIL] ffmpeg      未找到
+```
+
+- 探测正确：同时识别独显与核显，按"独显优先"判成 `nvidia`；
+- 编码器：本机 ffmpeg 缺失 → 自动 `libx264`（装带 NVENC 的 ffmpeg 后自动切 `h264_nvenc`）；
+- 绘图：装 CUDA 版 torch + 一份 FLUX.1-schnell 权重后即可走 `cuda`（INT4 OpenVINO 模型走不了 torch）。

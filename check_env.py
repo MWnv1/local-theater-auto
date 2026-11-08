@@ -93,25 +93,63 @@ def check_ffmpeg():
     try:
         r = subprocess.run([ff, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=30)
         text = (r.stdout or "") + (r.stderr or "")
-        for enc in ("h264_qsv", "hevc_qsv", "av1_qsv", "libx264", "aac"):
+
+        from theater import hardware
+
+        vendor = hardware.primary_vendor()
+        chosen = hardware.select_encoder(
+            vendor, text, preferred=os.environ.get("VIDEO_ENCODER", "auto")
+        )
+        hw_ok = hardware.is_hardware_encoder(chosen)
+        add(OK if hw_ok else WARN, "选定视频编码器",
+            f"{chosen}（{vendor} 平台" + ("，硬编" if hw_ok else "，无可用硬件编码器 → CPU 软编") + "）")
+
+        for enc in ("h264_nvenc", "h264_amf", "h264_qsv", "h264_videotoolbox", "libx264", "aac"):
             add(OK if enc in text else WARN, f"编码器 {enc}", "可用" if enc in text else "不可用")
-        if "h264_qsv" not in text:
-            add(WARN, "QSV 硬件编码", "当前 ffmpeg 不含 h264_qsv，导出会自动回退 libx264（更慢，画质/码率可控）")
-        vendor = ""
+
+        # 真编一次 2 帧黑场，确认这个编码器不是"只有名字没有实现"
         try:
+            args = hardware.encoder_quality_args(chosen, "23")
             r2 = subprocess.run(
-                [ff, "-hide_banner", "-v", "verbose", "-f", "lavfi", "-i", "color=c=black:s=32x32:d=0.1",
-                 "-c:v", "h264_qsv", "-f", "null", "-"],
+                [ff, "-hide_banner", "-v", "error", "-f", "lavfi",
+                 "-i", "color=c=black:s=64x64:d=0.1", "-c:v", chosen] + args + ["-f", "null", "-"],
                 capture_output=True, text=True, timeout=30,
             )
-            err = (r2.stderr or "").strip().splitlines()
-            vendor = next((l.strip() for l in err if "qsv" in l.lower() and "device" in l.lower()), "")
-            if r2.returncode != 0:
-                add(WARN, "QSV 实际可用性", "编码测试失败（可能是非 Intel 平台，属预期；导出会回退 libx264）")
+            if r2.returncode == 0:
+                add(OK, f"{chosen} 实际可用性", "编码测试通过")
+            else:
+                tail = (r2.stderr or "").strip().splitlines()[-2:]
+                add(WARN, f"{chosen} 实际可用性", "编码测试失败：" + " / ".join(tail))
         except Exception as e:
-            add(WARN, "QSV 实际可用性", f"测试异常：{e}")
+            add(WARN, f"{chosen} 实际可用性", f"测试异常：{e}")
     except Exception as e:
         add(WARN, "编码器检测", f"异常：{e}")
+
+
+def check_hardware():
+    """显卡厂商 + 绘图后端判定（NVIDIA / AMD / Intel 通用）。"""
+    from theater import hardware
+
+    adapters = hardware.list_adapters()
+    if adapters:
+        add(OK, "显卡", "、".join(adapters[:4]))
+    else:
+        add(WARN, "显卡", "未识别（不影响运行，默认 CPU + libx264）")
+
+    vendor = hardware.primary_vendor(adapters)
+    add(OK if vendor != hardware.VENDOR_UNKNOWN else WARN, "主显卡厂商", vendor)
+
+    avail = {
+        "openvino": importlib.util.find_spec("openvino") is not None,
+        "torch": importlib.util.find_spec("torch") is not None
+        and importlib.util.find_spec("diffusers") is not None,
+        "directml": importlib.util.find_spec("torch_directml") is not None,
+    }
+    picked = hardware.pick_draw_backend(vendor, avail, os.name == "nt")
+    if picked["backend"]:
+        add(OK, "绘图后端", f"{picked['backend']} / {picked['device']}（{picked['reason']}）")
+    else:
+        add(FAIL, "绘图后端", picked["reason"] + "；见 README 第 11 节")
 
 
 def check_models():
@@ -200,6 +238,7 @@ def main():
 
     _safe(check_python, "python")
     _safe(check_packages, "packages")
+    _safe(check_hardware, "hardware")
     _safe(check_cache, "cache")
     _safe(check_ffmpeg, "ffmpeg")
     _safe(check_models, "models")

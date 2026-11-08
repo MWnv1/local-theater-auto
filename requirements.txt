@@ -3,14 +3,18 @@
 # Websites: https://imworkingnow.cc.cd | https://imwn.cc.cd | https://imwn.dpdns.org
 # Generated: 2026-11-07 09:31:28 +08:00 (Asia/Shanghai) [UTC 2026-11-07T01:31:28Z]
 #
-# 本地图文小剧场 —— OpenVINO / Intel 平台依赖
+# 本地图文小剧场 —— 依赖清单（NVIDIA / AMD / Intel 通用）
 # 安装： python -m pip install -r requirements.txt
 # 注意：必须 64 位 Python（OpenVINO 不支持 32 位）
+#
+# 显卡适配：代码会自动探测显卡并选择绘图后端与视频编码器（见 README 第 11 节）。
+# 下面装的 openvino 系是"任何平台都能跑"的基线（Intel 走 GPU，其余走 CPU）。
+# 想在自己的显卡上跑快，按第 13～15 行的注释额外装一套：
 
 # --- MCP 服务端 ---
 mcp>=1.2.0
 
-# --- 绘图（OpenVINO 核显） ---
+# --- 绘图（OpenVINO：Intel 核显/Arc 走 GPU，其余平台 CPU 可用） ---
 openvino>=2024.4.0
 openvino-tokenizers>=2024.4.0
 optimum[openvino]>=1.21.0
@@ -21,6 +25,13 @@ sentencepiece>=0.2.0
 protobuf>=4.25.0
 huggingface_hub>=0.24.0
 numpy>=1.24.0
+
+# --- 可选：NVIDIA 显卡加速（CUDA 版 PyTorch，装完 DRAW_BACKEND=auto 会自动走 cuda） ---
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+# --- 可选：AMD 显卡加速（Windows 用 DirectML；Linux 用 ROCm 版 PyTorch） ---
+# pip install torch torch-directml          # Windows
+# pip install torch --index-url https://download.pytorch.org/whl/rocm6.2   # Linux
 
 # --- 抠图（离线，需预置 u2net.onnx） ---
 rembg>=2.0.57
@@ -33,4 +44,7 @@ pillow>=10.2.0
 pyttsx3>=2.90
 comtypes>=1.2.0; sys_platform == "win32"
 
-# ffmpeg / ffprobe 为外部可执行文件，不通过 pip 安装，见 README
+# ffmpeg / ffprobe 为外部可执行文件，不通过 pip 安装。
+# 硬编码需要对应构建：h264_nvenc 要 NVIDIA 驱动 + 带 NVENC 的 ffmpeg；
+# h264_amf 要 AMD 驱动 + 带 AMF 的 ffmpeg；h264_qsv 要 Intel 核显/Arc。
+# 一个都没有时自动回退 libx264（软编，慢但一定能出片）。

@@ -3,6 +3,41 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.0] - 2026-11-08
+
+### Added
+
+- `theater/hardware.py`：显卡探测与选型（纯标准库，无第三方依赖）。探测 `nvidia-smi` +
+  `Win32_VideoController`（Windows）/ `lspci`（Linux），归一成 `nvidia` / `amd` / `intel`，
+  按"独显优先"判定主显卡。
+- `hardware.select_encoder`：按厂商从 `ffmpeg -encoders` 里挑真实可用的编码器
+  （NVIDIA→`h264_nvenc`，AMD→`h264_amf`，Intel→`h264_qsv`），一个没有就落 `libx264`。
+- `hardware.encoder_quality_args`：三家硬编码器参数分别拼——QSV 用 `-global_quality`、
+  NVENC 用 `-rc vbr -cq`、AMF 用 `-rc cqp -qp_i/-qp_p`、软编用 `-crf`。
+- `hardware.pick_draw_backend` + `suggest_openvino_device`：NVIDIA→torch/cuda、
+  AMD→torch/dml（Windows）、Intel→openvino/GPU、其余→openvino/CPU。
+- `tests/test_hardware.py`：19 个单测锁定上述决策（含"NVENC 绝不能收到 `-crf`"这类硬约束）。
+- 新环境变量：`GPU_ADAPTERS` / `GPU_VENDOR`（覆盖探测）、`DRAW_BACKEND` / `DRAW_DEVICE`、
+  `NVENC_CQ` / `AMF_QP`（各厂商画质）。
+
+### Changed
+
+- `theater/ai_draw.py`：从"仅 OpenVINO"改为**双后端**（OpenVINO / PyTorch）。PyTorch 走
+  `diffusers.DiffusionPipeline`，设备分 CUDA / DirectML / CPU 三档。仍保留懒加载、线程锁、
+  缓存命中跳过、离线抠图降级。
+- `theater/video_export.py`：`VIDEO_ENCODER` 默认值由写死 `h264_qsv` 改为 `auto`；
+  编码器解析改走 `hardware.select_encoder`，参数改走 `hardware.encoder_quality_args`；
+  新增 `VIDEO_CODEC`（h264 / hevc / av1）。
+- `check_env.py`：新增"显卡 / 主显卡厂商 / 绘图后端"三项；编码器检查从"只测 h264_qsv"
+  改为"按厂商选定编码器并**真编 2 帧黑场**验证"，避免"有名字没实现"的假可用。
+- `requirements.txt`：补 CUDA / DirectML / ROCm 三套可选安装命令与 ffmpeg 构建要求。
+- `README.md`：新增第 11 节「显卡适配」——自动选型矩阵、模型格式对照、环境变量表、本机实测。
+
+### Fixed
+
+- 给非 Intel 平台传 `-crf` 被忽略或报错的问题（现按编码器分别传参）。
+- 有独显却按核显判定设备的问题（现 NVIDIA > AMD > Intel，独显优先）。
+
 ## [1.1.0] - 2026-11-08
 
 ### Changed
