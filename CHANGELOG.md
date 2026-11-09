@@ -70,6 +70,12 @@
   改为先试 1.x 再 fallback，两代都能起。
 - 补 `D:\ai_models\sd15-base\feature_extractor\preprocessor_config.json`
   （只下了 unet/vae/text_encoder 时 diffusers 会报 `Can't load image processor`）。
+- `server.py::_out_path()`：`clone_voice(out_name="probe")` 这种不带后缀的写法会一路传到
+  pydub，再报 `No format specified and unable to get format from file extension` 并静默
+  退回 SAPI——音频确实生成了，但不是克隆音色。改成按用途补默认后缀
+  （音频 `.wav`、视频 `.mp4`）。
+- `theater/video_ref.py::generate_similar_video()`：组装帧序列时同样撞上 concat demuxer
+  不认 `-framerate`，改 `-r <fps>`。
 
 ### Verified
 

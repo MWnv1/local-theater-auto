@@ -161,11 +161,19 @@ def theater_compose_frames(script_text: str, force: bool = False) -> str:
         return _err("theater_compose_frames", e)
 
 
-def _out_path(out_name: str) -> str:
-    """成片/音频输出目录：项目下 output/，允许传绝对路径。"""
+def _out_path(out_name: str, default_ext: str = "") -> str:
+    """成片/音频输出目录：项目下 output/，允许传绝对路径。
+
+    `default_ext` 不是空的，而 out_name 又没带扩展名时补上。pydub/ffmpeg 都靠
+    扩展名判格式，`clone_voice(out_name="probe")` 这种写法会直接报
+    "No format specified"，所以在入参侧就把后缀补齐，别让它跑到下游才炸。
+    """
     d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
     os.makedirs(d, exist_ok=True)
-    return out_name if os.path.isabs(out_name) else os.path.join(d, out_name)
+    p = out_name if os.path.isabs(out_name) else os.path.join(d, out_name)
+    if default_ext and not os.path.splitext(p)[1]:
+        p += default_ext
+    return p
 
 
 @mcp.tool()
@@ -178,7 +186,7 @@ def theater_export_video(script_text: str, out_name: str = "output.mp4", force: 
         steps = ["assets", "tts", "sfx", "frames", "video"]
         if animate:
             steps.insert(3, "anim")
-        return _ok(run_pipeline(script_text, _out_path(out_name), steps=steps, force=force))
+        return _ok(run_pipeline(script_text, _out_path(out_name, ".mp4"), steps=steps, force=force))
     except Exception as e:
         return _err("theater_export_video", e)
 
@@ -189,7 +197,7 @@ def theater_run_all(script_text: str, out_name: str = "output.mp4", force: bool 
     try:
         from pipeline_full import run_pipeline
 
-        return _ok(run_pipeline(script_text, _out_path(out_name), force=force))
+        return _ok(run_pipeline(script_text, _out_path(out_name, ".mp4"), force=force))
     except Exception as e:
         return _err("theater_run_all", e)
 
@@ -204,7 +212,7 @@ def theater_clone_voice(text: str, ref_audio: str, out_name: str = "clone.wav",
     try:
         from theater import tts_clone
 
-        out = tts_clone.synth(text, ref_audio=ref_audio, out_path=_out_path(out_name),
+        out = tts_clone.synth(text, ref_audio=ref_audio, out_path=_out_path(out_name, ".wav"),
                               engine=engine, ref_text=ref_text, force=True)
         return _ok({"audio": out, "engine": tts_clone.last_engine(),
                     "bytes": os.path.getsize(out), "status": tts_clone.status()})
@@ -242,7 +250,7 @@ def theater_generate_similar_video(video_path: str, prompt: str = "", out_name: 
 
         mf = int(max_frames) if max_frames else None
         out, info = video_ref.generate_similar_video(
-            video_path, prompt, _out_path(out_name), keep_audio=keep_audio, max_frames=mf)
+            video_path, prompt, _out_path(out_name, ".mp4"), keep_audio=keep_audio, max_frames=mf)
         report = video_ref.similarity_report(video_path, out)
         return _ok({"video": out, "info": info, "report": report})
     except Exception as e:
