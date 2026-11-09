@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "local-theater-auto": {
+      "command": "D:\\AI_T_MCP\\.venv312\\Scripts\\python.exe",
+      "args": ["D:\\AI_T_MCP\\server.py"],
+      "env": {
+        "PYTHONIOENCODING": "utf-8",
+        "TTS_ENGINE": "auto",
+        "LLM_BACKEND": "auto",
+        "ANIM_FPS": "24"
+      }
+    }
+  }
+}

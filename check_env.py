@@ -63,6 +63,13 @@ def check_packages():
         ("transformers", "transformers"),
         ("diffusers", "diffusers"),
         ("nncf", "nncf"),
+        # 声音克隆（F5-TTS）这条链
+        ("torchaudio", "torchaudio"),
+        ("f5_tts", "f5-tts"),
+        ("vocos", "vocos"),
+        ("soundfile", "soundfile"),
+        ("librosa", "librosa"),
+        ("datasets", "datasets"),
     ]
     for mod, pipname in pkgs:
         spec = importlib.util.find_spec(mod)
@@ -189,17 +196,56 @@ def check_models():
     if os.path.isdir(other) and os.listdir(other):
         add(OK, "备用绘图模型", f"{other}（当前后端用不到它）")
 
-    llm_dir = os.environ.get("LLM_MODEL_DIR", os.path.join(MODEL_ROOT, "qwen3-4b-int4-ov"))
-    if os.path.isdir(llm_dir) and os.listdir(llm_dir):
-        add(OK, "剧本生成模型", llm_dir)
-    else:
-        add(WARN, "剧本生成模型", f"未就绪（不影响 MCP 工具；仅影响自动写剧本）：{llm_dir}")
+    llm_torch = os.environ.get("LLM_TORCH_DIR", os.path.join(MODEL_ROOT, "qwen3-4b"))
+    llm_ov = os.environ.get("LLM_OV_DIR", os.path.join(MODEL_ROOT, "qwen3-4b-int4-ov"))
+    ready = [d for d in (llm_torch, llm_ov) if os.path.isdir(d) and os.listdir(d)]
+    add(OK if ready else WARN, "剧本生成模型", ready[0] if ready
+        else f"未就绪（不影响 MCP 工具；仅影响自动写剧本）：{llm_torch} 或 {llm_ov}")
+
+    # 声音克隆：F5-TTS 权重 + vocoder（两个目录都要齐）
+    f5_dir = os.environ.get("F5_MODEL_DIR", os.path.join(MODEL_ROOT, "f5-tts", "F5TTS_v1_Base"))
+    f5_ckpt = os.path.join(f5_dir, "model_1250000.safetensors")
+    f5_vocab = os.path.join(f5_dir, "vocab.txt")
+    add(OK if os.path.exists(f5_ckpt) and os.path.exists(f5_vocab) else WARN,
+        "克隆模型 F5-TTS", f5_dir if os.path.exists(f5_ckpt) else f"缺 model_1250000.safetensors：{f5_dir}")
+
+    vocos_dir = os.environ.get("VOCOS_DIR", os.path.join(MODEL_ROOT, "vocos-mel-24khz"))
+    need = ("config.yaml", "pytorch_model.bin")
+    ok = all(os.path.exists(os.path.join(vocos_dir, f)) for f in need)
+    add(OK if ok else WARN, "声码器 vocos", vocos_dir if ok else f"缺 config.yaml/pytorch_model.bin：{vocos_dir}")
+
+    # 参考视频 → 相似视频用的 SD1.5
+    sd_dir = os.environ.get("SIM_SD_MODEL", os.path.join(MODEL_ROOT, "sd15-base"))
+    ok = os.path.exists(os.path.join(sd_dir, "model_index.json"))
+    add(OK if ok else WARN, "重绘模型 SD1.5", sd_dir if ok
+        else f"缺 model_index.json（参考视频重绘不可用）：{sd_dir}")
 
     u2net = os.path.join(MODEL_ROOT, "rembg", "u2net.onnx")
     if os.path.exists(u2net):
         add(OK, "抠图模型 u2net.onnx", u2net)
     else:
         add(WARN, "抠图模型 u2net.onnx", f"缺失，将自动降级为白底抠图（建议放到 {u2net}）")
+
+
+def check_new_capabilities():
+    """声音克隆 / 骨骼动画 / 素材库 / 参考视频重绘：四项新能力的就绪状态。"""
+    from theater import library, tts_clone, video_ref
+
+    st = tts_clone.status()
+    ready = st.get("clone_available")
+    add(OK if ready else WARN, "配音引擎",
+        f"{st.get('engine_resolved')}（clone 可用={ready}，setting={st.get('engine_setting')}）")
+
+    from theater import animator, rigging  # noqa: F401
+
+    add(OK, "骨骼绑定/动作", "动作：" + "、".join(sorted(animator.ACTIONS)))
+
+    s = library.stats()
+    add(OK if s.get("total") else WARN, "素材/音效库",
+        f"{s.get('total', 0)} 条 / {s.get('size_mb', 0)} MB @ {s.get('root', '')}")
+
+    ok = video_ref._sd_available()
+    add(OK if ok else WARN, "参考视频重绘", "SD1.5 img2img 就绪" if ok else "SD1.5 不可用，只能做分析+复制音轨")
 
 
 def check_fonts_and_tts():
@@ -266,6 +312,7 @@ def main():
     _safe(check_cache, "cache")
     _safe(check_ffmpeg, "ffmpeg")
     _safe(check_models, "models")
+    _safe(check_new_capabilities, "new-capabilities")
     _safe(check_fonts_and_tts, "fonts/tts")
 
     if "--json" in sys.argv:

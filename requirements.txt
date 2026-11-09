@@ -49,9 +49,56 @@ onnxruntime>=1.17.0
 # --- 图像合成 ---
 pillow>=10.2.0
 
-# --- 离线配音（Windows SAPI5） ---
+# --- 离线配音（Windows SAPI5，克隆不可用时的兜底） ---
 pyttsx3>=2.90
 comtypes>=1.2.0; sys_platform == "win32"
+
+# ===========================================================================
+# AI 声音克隆（F5-TTS）：把"系统 TTS"换成"给定一段参考语音就模仿它"
+# ===========================================================================
+# 这一组必须逐个 --no-deps 装。原因有两条：
+#   1) f5-tts 声明的依赖含 torch / gradio / bitsandbytes / deepspeed，正常装会把
+#      已经跑通的 torch 2.9.1+cu128 顶掉，或者直接卡在 resolution-too-deep；
+#   2) 其中几个包（cached_path、deepspeed、triton）在本机装不上，而它们的功能
+#      本项目根本用不到。
+# 装法（走清华 PyPI 快镜像）：
+#   pip install --no-deps -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple torchaudio==2.9.0+cu128 f5-tts==1.1.22 vocos soundfile
+# torchaudio 建议直接用阿里云 cu128 wheel，免得被解析成 CPU 版：
+#   https://mirrors.aliyun.com/pytorch-wheels/cu128/torchaudio-2.9.0%2Bcu128-cp312-cp312-win_amd64.whl
+#
+# 依赖链（缺什么补什么，每轮都 --no-deps；自动化脚本见 _tools/fix_deps.py）：
+#   vocos → encodec → einops
+#   x-transformers → torch_einops_utils → einx → frozendict
+#   x-transformers → loguru → win32-setctime
+#   x-transformers → beartype / torchtyping / typeguard / jaxtyping
+#   hydra-core → antlr4-python3-runtime==4.9.3
+#   matplotlib → cycler / contourpy / fonttools / kiwisolver / pyparsing / python-dateutil / six
+#   librosa → soxr / audioread / lazy_loader / pooch / numba / llvmlite / decorator / msgpack
+#   wandb → gql / sentry-sdk / setproctitle / docker-pycreds / gitpython / platformdirs / psutil / pyyaml / xxhash
+#   datasets → dill / aiohttp / multiprocess / pandas / pyarrow
+#
+# 三个必须钉死的版本 / 行为：
+#   * datasets==3.6.0     —— 5.x 会 import huggingface_hub 里不存在的
+#                            BucketNotFoundError（本地 hub 是 0.36.2，没这个符号）
+#   * cached_path 一律不装 —— 0.1.0~1.8.10 全都在 import 时 `from google.cloud import
+#                            storage` 失败；补 google-api-core/google-auth 只会越补越深。
+#                            正解是 _tools/cached_path_shim.py 覆盖到
+#                            .venv312\Lib\site-packages\cached_path.py（只认本地路径，
+#                            遇 http/gs/s3 直接抛 "offline mode: remote resource refused"）。
+#   * vocos 权重必须本地 —— F5 的 F5TTS(..., vocoder_local_path=<目录>) 要求该目录
+#                            同时有 config.yaml 与 pytorch_model.bin（来自
+#                            charactr/vocos-mel-24khz，config 只有 461 B）。
+#
+# torchaudio 2.9 的 torchaudio.load 已改走 torchcodec，而 torchcodec 需要共享版
+# ffmpeg（本项目用的静态构建，bin 下 0 个 dll）→ 运行时会 WinError 127。
+# theater/tts_clone.py 的 _patch_f5_audio_io() 把 load 换成 soundfile 实现绕开了，
+# 所以不需要装 torchcodec，也不需要换成共享版 ffmpeg。
+
+# ===========================================================================
+# 剧本生成（Qwen3-4B）
+# ===========================================================================
+# 不再依赖"OpenVINO INT4 导出包"，torch 格式三 shard 直接放 MODEL_ROOT/qwen3-4b 即可。
+# 有 Intel NPU 时优先 OpenVINO，没有就自动退 GPU / CPU（见 README 第 13 节）。
 
 # ffmpeg / ffprobe 为外部可执行文件，不通过 pip 安装。
 # 硬编码需要对应构建：h264_nvenc 要 NVIDIA 驱动 + 带 NVENC 的 ffmpeg；

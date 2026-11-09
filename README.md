@@ -436,3 +436,174 @@ D:\AI_T_MCP\.venv312\Scripts\python.exe D:\AI_T_MCP\_tools\probe_flux.py bf16_se
    否则 `torchvision::nms` 缺失，`transformers` 一导入 CLIP 组件就崩；
 2. T5 tokenizer 需要 `sentencepiece`，不装会报
    `Cannot instantiate this tokenizer from a slow version`。
+
+## 13. AI 生产管线（克隆配音 / 骨骼动画 / 参考视频重绘 / 素材库 / 剧本模型 / 客户端）
+
+第 1–12 节做的是"图片 + 系统配音 + 硬编成片"。这一节把整条链路换成本地 AI 生产：
+声音克隆替掉 SAPI、人物真的会动、能按参考视频生成相似视频、出图和出音都会先问素材库、
+剧本由本地 4B 模型写，最后用 LobeHub 当对话客户端调 MCP。
+
+### 13.1 六项能力与对应模块
+
+| # | 能力 | 模块 | 缺省行为 |
+|---|---|---|---|
+| 1 | 声音克隆替掉 Windows SAPI | `theater/tts_clone.py`（F5-TTS 1.1.22） | 有参考音 → clone；没有参考音或没配套文字 → 自动回落 SAPI |
+| 2 | 人物骨骼绑定、能动 | `theater/rigging.py` + `theater/animator.py` | 按 alpha 切 6 部件 7 关节，动作是 `pose_at(action, t)` 纯函数 |
+| 3 | 按参考视频生成相似视频 | `theater/video_ref.py`（SD1.5 img2img） | 逐帧重绘、保留原音轨、输出相似度报告 |
+| 4 | 音效库 + 素材库 | `theater/library.py` | 9 个内置音效现场合成；出图/出音前先查库，命中就复用 |
+| 5 | 剧本生成模型 | `pipeline_full.py::generate_script` | `LLM_BACKEND=auto`：torch 优先，OpenVINO 可选（NPU→GPU→CPU） |
+| 6 | 对话客户端 | LobeHub 2.3.2 + `server.py`（13 个 MCP 工具） | 没装客户端时 MCP 仍可被任意 MCP 客户端调用 |
+
+管线步骤（`pipeline_full.STEPS`）：`parse → assets → tts → sfx → anim → frames → video`
+
+### 13.2 安装（照抄，全部 D 盘）
+
+#### 13.2.1 声音克隆（F5-TTS）
+
+权重（ckpt 1.29 GB + 声码器 55 MB）：
+
+```powershell
+$py = "D:\AI_T_MCP\.venv312\Scripts\python.exe"
+& $py D:\AI_T_MCP\_tools\mdl.py "https://modelscope.cn/models/AI-ModelScope/F5-TTS/resolve/master" "D:\ai_models\f5-tts" "D:\AI_T_MCP\_tools\mf_f5.txt" 20
+curl.exe -L -C - -o D:\ai_models\vocos-mel-24khz\pytorch_model.bin "https://hf-mirror.com/charactr/vocos-mel-24khz/resolve/main/pytorch_model.bin"
+curl.exe -L -C - -o D:\ai_models\vocos-mel-24khz\config.yaml   "https://hf-mirror.com/charactr/vocos-mel-24khz/resolve/main/config.yaml"
+```
+
+依赖装法见 `requirements.txt` 里「AI 声音克隆」一段：核心是一律 `--no-deps`，
+且 `cached_path` 不装、改用 `_tools/cached_path_shim.py` 覆盖到 site-packages。
+
+参考语音放 `cache\voices\`，**每段 wav 建议配同名 .txt** 写这段音频说的原话：
+
+```
+cache\voices\zhou_ref.wav   # 3~10 秒、单人、无背景音
+cache\voices\zhou_ref.txt   # 这段音频对应的文字
+```
+
+没有 .txt 时程序会尝试 whisper 自动转写并缓存；离线环境转写必然失败，会打一行 warn 后回落 SAPI。
+
+#### 13.2.2 骨骼动画
+
+无额外依赖（Pillow + numpy 已在基线里）。立绘越干净（透明背景、正面、全身）切分越准，
+`rig.json` 会落在 `cache\rigs\`，同一张图两次 build 签名一致。
+
+#### 13.2.3 参考视频重绘（SD1.5）
+
+```powershell
+& $py D:\AI_T_MCP\_tools\mdl.py "https://modelscope.cn/models/AI-ModelScope/stable-diffusion-v1-5/resolve/master" "D:\ai_models\sd15-base" "D:\AI_T_MCP\_tools\mf_sd15.txt" 16
+# 必须补这个小文件，否则 diffusers 报 "Can't load image processor for ..."
+New-Item -ItemType Directory -Force -Path D:\ai_models\sd15-base\feature_extractor | Out-Null
+curl.exe -L -o D:\ai_models\sd15-base\feature_extractor\preprocessor_config.json "https://modelscope.cn/models/AI-ModelScope/stable-diffusion-v1-5/resolve/master/feature_extractor/preprocessor_config.json"
+```
+
+#### 13.2.4 剧本模型（Qwen3-4B）
+
+```powershell
+& $py D:\AI_T_MCP\_tools\mdl.py "https://modelscope.cn/models/Qwen/Qwen3-4B/resolve/master" "D:\ai_models\qwen3-4b" "D:\AI_T_MCP\_tools\mf_qwen.txt" 20
+```
+
+torch 格式三个 shard，bf16 约 8 GB，16 GB 显存可全量驻留（本机实测加载 147 s）。
+有 Intel NPU 时设 `LLM_BACKEND=openvino` 并准备 INT4 IR；没有就留 `auto`。
+
+#### 13.2.5 客户端（LobeHub）
+
+```powershell
+# api.github.com 可直连；资产在 github.com 上只有 40 KB/s，走镜像 + 分段并行
+$rel = Invoke-RestMethod "https://api.github.com/repos/lobehub/lobehub/releases/latest" -Headers @{"User-Agent"="PowerShell"}
+$exe = ($rel.assets | Where-Object { $_.name -like "*-setup.exe" }).browser_download_url
+& $py D:\AI_T_MCP\_tools\pdl2.py "https://gh-proxy.com/$exe" "D:\downloads\$(Split-Path $exe -Leaf)" "<sha256>" 4
+# 静默装到 D 盘：/D= 必须放最后，且不能加引号
+Start-Process "D:\downloads\LobeHub-2.3.2-setup.exe" -ArgumentList "/S","/D=D:\LobeHub" -Wait
+```
+
+### 13.3 新增环境变量
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `TTS_ENGINE` | `auto` | `auto/clone/sapi`；auto = F5 权重齐就用克隆 |
+| `TTS_REF_DIR` | `cache/voices` | 参考音频目录 |
+| `TTS_VOICE_MAP` | 空 | `角色=参考音频文件名`（克隆引擎用） |
+| `SAPI_VOICE_MAP` | 空 | `角色=SAPI 发音人名`（兜底用，与上面分开，避免撞车） |
+| `TTS_SPEED` | `1.0` | 克隆语速 |
+| `TTS_DEVICE` | `auto` | `auto/cuda/cpu` |
+| `F5_MODEL_DIR` | `MODEL_ROOT/f5-tts/F5TTS_v1_Base` | ckpt + vocab.txt |
+| `VOCOS_DIR` | `MODEL_ROOT/vocos-mel-24khz` | 声码器目录（config.yaml + pytorch_model.bin） |
+| `ANIM_FPS` | `24` | 动画渲染帧率（成片仍按 `VIDEO_FPS` 编码） |
+| `SIM_VIDEO_BACKEND` | `auto` | `auto/img2img/none` |
+| `SIM_SD_MODEL` | `MODEL_ROOT/sd15-base` | SD1.5 目录 |
+| `SIM_SIZE` / `SIM_STEPS` / `SIM_STRENGTH` | `512` / `8` / `0.45` | 重绘长边 / 采样步数 / 改动强度 |
+| `SIM_MAX_FRAMES` | `240` | 最多重绘多少帧（超出按等间隔抽帧，再复制回原帧率保住时长） |
+| `THEATER_LIBRARY` | `项目根/library` | 素材库根目录（索引 `index.json`） |
+| `LIBRARY_MIN_SCORE` / `LIBRARY_FIRST` | `0.45` / `1` | 命中阈值 / 是否先查库 |
+| `LLM_BACKEND` | `auto` | `auto/torch/openvino` |
+| `LLM_TORCH_DIR` / `LLM_OV_DIR` | `MODEL_ROOT/qwen3-4b` / `...-int4-ov` | 两套权重 |
+| `LLM_DEVICE` | `auto` | OpenVINO 设备：NPU→GPU→CPU 自动挑真实存在的 |
+
+### 13.4 本机实测（RTX 5060 Ti 16G / Ryzen 5 9600X / 全 D 盘）
+
+| 项目 | 实测数字 |
+|---|---|
+| F5-TTS 克隆单句（含首次加载模型） | 22.3 s，16 字 |
+| F5-TTS 批量 2 句（模型已常驻） | 12.4 s，24 kHz mono pcm_s16le，engine=clone |
+| 骨骼绑定（512×512 立绘） | 6 部件 7 关节，签名 `4a096c50a50e`，同图两次 build 一致 |
+| 动画渲染 | 2 镜头共 144 帧（60 + 84），24 fps，24.7 s（含逐帧合成字幕与背景） |
+| 内置音效 | 9 个现场合成入库，0.7 MB，耗时 < 1 s |
+| 成片（2 镜头：克隆配音 + 音效 + 动画） | 6.02 s / 1920×1080 / 30 fps / 180 帧 / 1.13 MB，NVENC 编码 5.1 s |
+| 动作真实性核对 | 抽 0.2 s 与 1.0 s 两帧：mean_abs_diff 0.426，0.88% 像素在动 |
+| 参考视频 → 相似视频（24 帧） | 24.2 s，出片 6.0 s / 30 fps / 1920×1080 / 180 帧 / 保留了原音轨 |
+| 相似度报告 | 时长偏差 0.0%，fps 与分辨率一致，边缘 IoU 均值 0.344 |
+| SD1.5 img2img 单帧 | 512 px 重绘再放大回 1080p ≈ 0.9 s/帧（直接在 1080p 上跑是 75 s/帧） |
+| 剧本生成（Qwen3-4B bf16） | 加载 147 s + 生成 6 镜头 32 s（合计 179.8 s） |
+| FLUX 出图（基线，供对比） | 512 px ≈ 21 分钟 / 1024 px 1504 s（sequential offload） |
+
+### 13.5 这一节踩过的坑（症状 → 原因 → 解法）
+
+| 症状 | 原因 | 解法 |
+|---|---|---|
+| `use_ema=False` 报一大串 Missing/Unexpected key | 官方 ckpt 里键名全是 `ema_model.*` | `F5TTS(..., use_ema=True)` |
+| 克隆时仍联网要下 vocos | F5 自己走 `hf_hub_download`，monkeypatch `Vocos.from_pretrained` 无效 | 传 `vocoder_local_path=<同时有 config.yaml 与 pytorch_model.bin 的目录>` |
+| `OSError: [WinError 127]` 读音频 | torchaudio 2.9 的 `load` 改走 torchcodec，torchcodec 要共享版 ffmpeg（本项目是静态构建） | `_patch_f5_audio_io()` 把 `load` 换成 soundfile；重采样仍用 `torchaudio.functional` |
+| `import datasets` 报 `BucketNotFoundError` | datasets 5.x 要 hub 新符号，本地 hub 是 0.36.2 | 钉 `datasets==3.6.0` |
+| `import cached_path` 永远卡在 `google.cloud` | 0.1.0~1.8.10 都这样，补 google 包只会越补越深 | 卸掉 cached_path，用 `_tools/cached_path_shim.py` 覆盖 |
+| `Option framerate not found` | `-framerate` 属 image2 demuxer，concat demuxer 不认 | 帧序列用 `-r <fps> -f concat -safe 0 -i list.txt` |
+| 成片比预期短 1.3 s | `-shortest` 让镜头被较短的音轨截断（台词后面本来留白） | 去掉 `-shortest`，改 `-af apad` + `-t <时长>` |
+| SD1.5 加载报 `Can't load image processor` | 只下了 unet/vae/text_encoder，缺 `feature_extractor/preprocessor_config.json` | 从 ModelScope 补这一个小文件 |
+| `ModuleNotFoundError: mcp.server.fastmcp` | mcp 2.x 把 FastMCP 改名成 MCPServer | `server.py` 先试 1.x，失败再 fallback `mcp.server.mcpserver` |
+| pdl.py 下完的安装包哈希不对、装不上 | 分段拼接错乱（大小对、内容错） | 换 `_tools/pdl2.py`：逐段校验长度 + 整文件 sha256，不过就不算下完 |
+| 镜像下大文件 HTTP 429 | 并发太高被限流 | 降到 4 线程 + 429 长退避 + 断点续传 |
+
+### 13.6 客户端接入（LobeHub + MCP）
+
+仓库内已提供 `mcp/lobe-mcp.json`：
+
+```json
+{
+  "mcpServers": {
+    "local-theater-auto": {
+      "command": "D:\\AI_T_MCP\\.venv312\\Scripts\\python.exe",
+      "args": ["D:\\AI_T_MCP\\server.py"],
+      "env": { "TTS_ENGINE": "auto", "LLM_BACKEND": "auto" }
+    }
+  }
+}
+```
+
+在 LobeHub「设置 → MCP / 插件」里粘贴这段即可看到 13 个工具：
+`theater_check_env` / `theater_parse_script` / `theater_generate_script` / `theater_generate_assets` /
+`theater_generate_tts` / `theater_compose_frames` / `theater_export_video` / `theater_run_all` /
+`theater_clone_voice` / `theater_animate_character` / `theater_generate_similar_video` /
+`theater_library_search` / `theater_make_sfx`
+
+典型对话：先说"用 6 个镜头写一个深夜机房的故事"，再"生成素材和配音"，
+最后"导出成片"——三个工具依次串起来，中间产物全部落在 `cache\` 和 `library\`，重跑幂等。
+
+### 13.7 复验命令
+
+```powershell
+cd D:\AI_T_MCP
+$py = "D:\AI_T_MCP\.venv312\Scripts\python.exe"
+& $py check_env.py                        # 期望 FAIL 0 项
+& $py -m unittest discover -s tests       # 期望 53/53 OK
+& $py _tools\smoke_clone.py               # 克隆一句，真出 wav
+& $py _tools\e2e_demo.py                  # 2 镜头全链路 → cache\demo_animated.mp4
+& $py _tools\probe_similar.py             # 参考视频 → 相似视频 + 相似度报告
+```

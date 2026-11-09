@@ -119,6 +119,78 @@ def _paste_character(canvas: Image.Image, char_img: Image.Image, anchor: float, 
     return x
 
 
+def _subtitle_layout(subtitle: str):
+    """算出字幕行数/行高/字幕条高度（角色区据此让位）。"""
+    font = _load_font()
+    probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+    lines = _wrap_text(probe, subtitle, font, VIDEO_W - 220)
+    line_h = _SUBTITLE_FONT_SIZE + 12
+    band_h = (len(lines) * line_h + 44) if lines else 0
+    return font, lines, line_h, band_h
+
+
+def _char_top_for(band_h: int) -> int:
+    char_h = int(VIDEO_H * 0.72)
+    return max(10, min(VIDEO_H - band_h - char_h - 10, VIDEO_H - band_h - char_h))
+
+
+def _scale_actor(img: Image.Image) -> Image.Image:
+    """角色统一缩到画面高度的 72%，保持等比。"""
+    target_h = int(VIDEO_H * 0.72)
+    new_w = max(1, int(img.width * (target_h / float(img.height))))
+    return img.resize((new_w, target_h), Image.Resampling.LANCZOS)
+
+
+def _blit_grouped(canvas: Image.Image, items: list, char_top: int) -> None:
+    """按站位分组贴角色：同组（同锚点）内均匀铺开，整组超宽时整体回收到画面内。"""
+    groups: Dict[float, list] = {}
+    for item in items:
+        groups.setdefault(item[2], []).append(item)
+
+    for anchor, group in groups.items():
+        n = len(group)
+        widths = [it[1].width for it in group]
+        avg_w = sum(widths) / n
+        base_center = VIDEO_W * anchor
+        if n == 1:
+            centers = [base_center]
+        else:
+            spacing = min(avg_w * 0.9, (VIDEO_W - 80) / n)
+            centers = [base_center + (i - (n - 1) / 2.0) * spacing for i in range(n)]
+
+        left_edge = centers[0] - widths[0] / 2
+        right_edge = centers[-1] + widths[-1] / 2
+        shift = 0
+        if left_edge < 20:
+            shift = 20 - left_edge
+        if right_edge + shift > VIDEO_W - 20:
+            shift = max(0, VIDEO_W - 20 - right_edge)
+        centers = [c + shift for c in centers]
+
+        for (name, img, _), center in zip(group, centers):
+            x = int(center - img.width / 2)
+            x = max(20, min(x, VIDEO_W - img.width - 20))
+            canvas.alpha_composite(img, (x, char_top))
+
+
+def _draw_subtitle(canvas: Image.Image, subtitle: str, font, lines, line_h: int, band_h: int) -> None:
+    if not lines:
+        return
+    band = Image.new("RGBA", (VIDEO_W, band_h), (0, 0, 0, _BAND_ALPHA))
+    canvas.alpha_composite(band, (0, VIDEO_H - band_h))
+    draw = ImageDraw.Draw(canvas)
+    y = VIDEO_H - band_h + 16
+    for line in lines:
+        tw = draw.textlength(line, font=font)
+        draw.text(((VIDEO_W - tw) / 2, y), line, font=font, fill=(255, 255, 255, 255))
+        y += line_h
+
+
+def _load_bg(bg_path: str) -> Image.Image:
+    bg = Image.open(bg_path).convert("RGBA")
+    return bg.resize((VIDEO_W, VIDEO_H), Image.Resampling.LANCZOS)
+
+
 def compose_scene_frame(
     bg_path: str,
     char_paths: Dict[str, str],
@@ -138,72 +210,51 @@ def compose_scene_frame(
     if not force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         return os.path.abspath(out_path)
 
-    bg = Image.open(bg_path).convert("RGBA")
-    bg = bg.resize((VIDEO_W, VIDEO_H), Image.Resampling.LANCZOS)
-    canvas = bg.copy()
+    canvas = _load_bg(bg_path)
+    font, sub_lines, line_h, band_h = _subtitle_layout(subtitle)
+    char_top = _char_top_for(band_h)
 
-    font = _load_font()
-    # 先算字幕占多高，角色区留出空间
-    probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
-    sub_lines = _wrap_text(probe, subtitle, font, VIDEO_W - 220)
-    line_h = _SUBTITLE_FONT_SIZE + 12
-    band_h = (len(sub_lines) * line_h + 44) if sub_lines else 0
-    char_top_area = VIDEO_H - band_h - int(VIDEO_H * 0.72) - 10
-    char_top = max(10, min(char_top_area, VIDEO_H - band_h - int(VIDEO_H * 0.72)))
-
-    # 角色按站位分组：同组（同锚点）内均匀铺开，避免全部叠在同一位置
-    prepared = []  # (name, image, anchor_key)
+    prepared = []  # (name, image, anchor)
     for char_name, char_path in char_paths.items():
         if not os.path.exists(char_path):
             continue
-        anchor_key = positions.get(char_name, "居中")
-        anchor = _POS_ANCHOR.get(anchor_key, 0.5)
-        img = Image.open(char_path).convert("RGBA")
-        target_h = int(VIDEO_H * 0.72)
-        new_w = max(1, int(img.width * (target_h / float(img.height))))
-        img = img.resize((new_w, target_h), Image.Resampling.LANCZOS)
-        prepared.append((char_name, img, anchor))
+        anchor = _POS_ANCHOR.get(positions.get(char_name, "居中"), 0.5)
+        prepared.append((char_name, _scale_actor(Image.open(char_path).convert("RGBA")), anchor))
 
-    groups: Dict[float, list] = {}
-    for item in prepared:
-        groups.setdefault(item[2], []).append(item)
+    _blit_grouped(canvas, prepared, char_top)
+    _draw_subtitle(canvas, subtitle, font, sub_lines, line_h, band_h)
 
-    for anchor, items in groups.items():
-        n = len(items)
-        widths = [it[1].width for it in items]
-        avg_w = sum(widths) / n
-        base_center = VIDEO_W * anchor
-        if n == 1:
-            centers = [base_center]
-        else:
-            spacing = min(avg_w * 0.9, (VIDEO_W - 80) / n)
-            centers = [base_center + (i - (n - 1) / 2.0) * spacing for i in range(n)]
+    canvas.convert("RGB").save(out_path, "PNG")
+    return os.path.abspath(out_path)
 
-        # 整组超宽时整体回收到画面内
-        left_edge = centers[0] - widths[0] / 2
-        right_edge = centers[-1] + widths[-1] / 2
-        shift = 0
-        if left_edge < 20:
-            shift = 20 - left_edge
-        if right_edge + shift > VIDEO_W - 20:
-            shift = max(0, VIDEO_W - 20 - right_edge)
-        centers = [c + shift for c in centers]
 
-        for (name, img, _), center in zip(items, centers):
-            x = int(center - img.width / 2)
-            x = max(20, min(x, VIDEO_W - img.width - 20))
-            canvas.alpha_composite(img, (x, char_top))
+def compose_actor_frame(
+    bg_path: str,
+    actor_images: Dict[str, Image.Image],
+    positions: Dict[str, str],
+    subtitle: str,
+    out_path: str,
+) -> str:
+    """用"某一时刻的角色图"合成整帧（角色可以带动作），写盘并返回路径。
 
-    if sub_lines:
-        band = Image.new("RGBA", (VIDEO_W, band_h), (0, 0, 0, _BAND_ALPHA))
-        canvas.alpha_composite(band, (0, VIDEO_H - band_h))
-        draw = ImageDraw.Draw(canvas)
-        y = VIDEO_H - band_h + 16
-        for line in sub_lines:
-            tw = draw.textlength(line, font=font)
-            draw.text(((VIDEO_W - tw) / 2, y), line, font=font, fill=(255, 255, 255, 255))
-            y += line_h
+    这是动画成片的单帧入口：调用方（pipeline 的 anim 步骤）对每个时间点先用
+    `animator.render_frame` 拿到该角色当下的立绘，再交给这里排版 + 叠加字幕。
+    """
+    canvas = _load_bg(bg_path)
+    font, sub_lines, line_h, band_h = _subtitle_layout(subtitle)
+    char_top = _char_top_for(band_h)
 
+    prepared = []
+    for char_name, img in actor_images.items():
+        if img is None:
+            continue
+        anchor = _POS_ANCHOR.get(positions.get(char_name, "居中"), 0.5)
+        prepared.append((char_name, _scale_actor(img.convert("RGBA")), anchor))
+
+    _blit_grouped(canvas, prepared, char_top)
+    _draw_subtitle(canvas, subtitle, font, sub_lines, line_h, band_h)
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     canvas.convert("RGB").save(out_path, "PNG")
     return os.path.abspath(out_path)
 

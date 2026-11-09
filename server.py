@@ -17,12 +17,17 @@
 工具（每个都是独立可调用的一步，便于"先生成剧本给我看，确认后再继续"）：
     theater_check_env()                         环境自检
     theater_parse_script(script_text)           剧本 → 结构化镜头（人读简报 + JSON）
-    theater_generate_script(requirement)        本地 LLM 写剧本（可选）
-    theater_generate_assets(script_text)        背景 + 角色透明立绘
-    theater_generate_tts(script_text)           台词配音
+    theater_generate_script(requirement)        本地 Qwen3-4B 写剧本（torch / OpenVINO）
+    theater_generate_assets(script_text)        背景 + 角色透明立绘（先查素材库，再自绘）
+    theater_generate_tts(script_text)           台词配音（F5-TTS 克隆，缺参考音退 SAPI）
     theater_compose_frames(script_text)         每镜头画面 + 字幕
-    theater_export_video(script_text, out_name) 成片（NVENC/QSV→自动回退）
+    theater_export_video(script_text, out_name) 成片（NVENC/QSV/AMF→自动回退 x264）
     theater_run_all(script_text, out_name)      一键全流程
+    theater_clone_voice(text, ref_audio)        参考语音 → 同音色合成新台词
+    theater_animate_character(char_image, ...)  立绘骨骼绑定 + 动作序列渲染
+    theater_generate_similar_video(video, ...)  参考视频 → 相似视频（逐帧 img2img）
+    theater_library_search(query)               检索素材库（图片 / 音效）
+    theater_make_sfx(name)                      合成内置音效并入库存档
 
 接口设计说明：所有工具都以 script_text 为唯一"状态载体"，中间产物靠文件缓存
 幂等复用。好处是 LobeChat 里分步调用时不用来回搬 JSON 路径；重跑时加 force=true。
@@ -35,9 +40,14 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mcp.server.fastmcp import FastMCP
+# mcp 2.x 把 FastMCP 改名成 MCPServer（mcp.server.mcpserver），1.x 还是 FastMCP。
+# 两代都支持 @server.tool() 和 run()，所以按可用的那个来，别把用户钉在某一版。
+try:
+    from mcp.server.fastmcp import FastMCP as _Server  # mcp < 2
+except Exception:  # pragma: no cover - 取决于本机装的是哪一代
+    from mcp.server.mcpserver import MCPServer as _Server  # mcp >= 2
 
-mcp = FastMCP("local-theater-auto")
+mcp = _Server("local-theater-auto")
 
 
 def _ok(payload) -> str:
@@ -151,29 +161,117 @@ def theater_compose_frames(script_text: str, force: bool = False) -> str:
         return _err("theater_compose_frames", e)
 
 
+def _out_path(out_name: str) -> str:
+    """成片/音频输出目录：项目下 output/，允许传绝对路径。"""
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+    os.makedirs(d, exist_ok=True)
+    return out_name if os.path.isabs(out_name) else os.path.join(d, out_name)
+
+
 @mcp.tool()
-def theater_export_video(script_text: str, out_name: str = "output.mp4", force: bool = False) -> str:
-    """导出成片：自动补齐素材/配音/画面，再按镜头拼接编码。"""
+def theater_export_video(script_text: str, out_name: str = "output.mp4", force: bool = False,
+                         animate: bool = True) -> str:
+    """导出成片：自动补齐素材/配音/音效/动画/画面，再按镜头拼接编码。"""
     try:
         from pipeline_full import run_pipeline
 
-        out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output", out_name)
-        res = run_pipeline(script_text, out_path, steps=["assets", "tts", "frames", "video"], force=force)
-        return _ok(res)
+        steps = ["assets", "tts", "sfx", "frames", "video"]
+        if animate:
+            steps.insert(3, "anim")
+        return _ok(run_pipeline(script_text, _out_path(out_name), steps=steps, force=force))
     except Exception as e:
         return _err("theater_export_video", e)
 
 
 @mcp.tool()
 def theater_run_all(script_text: str, out_name: str = "output.mp4", force: bool = False) -> str:
-    """一键跑完整流水线：解析 → 素材 → 配音 → 画面 → 成片。"""
+    """一键跑完整流水线：解析 → 素材 → 配音 → 音效 → 动画 → 画面 → 成片。"""
     try:
         from pipeline_full import run_pipeline
 
-        out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output", out_name)
-        return _ok(run_pipeline(script_text, out_path, force=force))
+        return _ok(run_pipeline(script_text, _out_path(out_name), force=force))
     except Exception as e:
         return _err("theater_run_all", e)
+
+
+@mcp.tool()
+def theater_clone_voice(text: str, ref_audio: str, out_name: str = "clone.wav",
+                        ref_text: str = "", engine: str = "clone") -> str:
+    """给定一段参考语音，用同音色合成新台词（F5-TTS zero-shot，全本地离线）。
+
+    ref_audio 旁放同名 .txt 写参考文字最稳（没写会自动尝试转写并缓存）。
+    """
+    try:
+        from theater import tts_clone
+
+        out = tts_clone.synth(text, ref_audio=ref_audio, out_path=_out_path(out_name),
+                              engine=engine, ref_text=ref_text, force=True)
+        return _ok({"audio": out, "engine": tts_clone.last_engine(),
+                    "bytes": os.path.getsize(out), "status": tts_clone.status()})
+    except Exception as e:
+        return _err("theater_clone_voice", e)
+
+
+@mcp.tool()
+def theater_animate_character(char_image: str, action: str = "wave", seconds: float = 2.0,
+                              fps: int = 24) -> str:
+    """给单张角色立绘做 2D 伪骨骼绑定，并渲染一段动作 PNG 序列。
+
+    action 可选 idle / nod / wave / walk / talk。
+    """
+    try:
+        from theater import animator, rigging
+
+        if action not in animator.ACTIONS:
+            return _ok({"warning": f"未知动作 {action}，已按 idle 处理",
+                        "actions": sorted(animator.ACTIONS)})
+        rig = rigging.rig_for(char_image)
+        clip = animator.render_clip(rig, action, float(seconds), int(fps))
+        return _ok({"rig": {"signature": rig.get("signature"), "parts": len(rig.get("parts", []))},
+                    "action": action, "clip": clip})
+    except Exception as e:
+        return _err("theater_animate_character", e)
+
+
+@mcp.tool()
+def theater_generate_similar_video(video_path: str, prompt: str = "", out_name: str = "similar.mp4",
+                                   max_frames: int = 0, keep_audio: bool = True) -> str:
+    """按参考视频生成"相似"视频：逐帧 img2img 保留构图与运动，并给出相似度报告。"""
+    try:
+        from theater import video_ref
+
+        mf = int(max_frames) if max_frames else None
+        out, info = video_ref.generate_similar_video(
+            video_path, prompt, _out_path(out_name), keep_audio=keep_audio, max_frames=mf)
+        report = video_ref.similarity_report(video_path, out)
+        return _ok({"video": out, "info": info, "report": report})
+    except Exception as e:
+        return _err("theater_generate_similar_video", e)
+
+
+@mcp.tool()
+def theater_library_search(query: str, kind: str = "", k: int = 5) -> str:
+    """检索素材库（图片/音效）：AI 出图出音前先问库，命中就直接复用。"""
+    try:
+        from theater import library
+
+        hits = library.search(query, kind=(kind or None), k=int(k))
+        return _ok({"query": query, "hits": hits, "stats": library.stats()})
+    except Exception as e:
+        return _err("theater_library_search", e)
+
+
+@mcp.tool()
+def theater_make_sfx(name: str = "rain") -> str:
+    """合成一条内置音效（rain/whoosh/click/typing/door/thud/incoming/heartbeat/chime）并入库存档。"""
+    try:
+        from theater import library
+
+        path = library.synth_sfx(name)
+        return _ok({"sfx": path, "name": name, "bytes": os.path.getsize(path),
+                    "stats": library.stats()})
+    except Exception as e:
+        return _err("theater_make_sfx", e)
 
 
 if __name__ == "__main__":

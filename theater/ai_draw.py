@@ -323,6 +323,48 @@ def _gen_image(prompt: str, filename: str, force: bool = False) -> str:
     return os.path.abspath(path)
 
 
+# ---------------------------------------------------------------------------
+# 素材库（先查库、再自绘；自绘产物自动入库）
+# ---------------------------------------------------------------------------
+LIBRARY_FIRST = os.environ.get("LIBRARY_FIRST", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _library_hit(query: str, kind: str = "image") -> Optional[dict]:
+    """问一句素材库：有没有现成能用的。库坏了不影响出图，只打一行 warn。"""
+    if not LIBRARY_FIRST:
+        return None
+    try:
+        from . import library
+
+        hit = library.pick_for_prompt(query, kind=kind)
+        if hit and os.path.exists(hit.get("path", "")):
+            return hit
+    except Exception as e:
+        print(f"[warn] 素材库检索失败（继续自绘）：{type(e).__name__}: {e}")
+    return None
+
+
+def _copy_into_assets(src: str, filename: str) -> str:
+    """把库里的素材复制成 assets 目录下的标准文件名，后续流程不用感知来源。"""
+    import shutil
+
+    dst = os.path.join(_ASSET_DIR, filename)
+    shutil.copyfile(src, dst)
+    return os.path.abspath(dst)
+
+
+def _remember(path: str, tags: list, source: str = "ai") -> None:
+    """自绘产物入库，下次同一 prompt 直接命中（越用越省时间）。"""
+    if not LIBRARY_FIRST:
+        return
+    try:
+        from . import library
+
+        library.add("image", path, tags=tags, source=source)
+    except Exception as e:
+        print(f"[warn] 素材入库失败：{type(e).__name__}: {e}")
+
+
 def generate_scene_assets(script_struct: dict, force: bool = False) -> Dict:
     """生成 1 张通用背景 + 每个角色一张透明立绘。
 
@@ -342,12 +384,18 @@ def generate_scene_assets(script_struct: dict, force: bool = False) -> Dict:
         used_dir = DRAW_MODEL_DIR
     assets: Dict = {"background": "", "backgrounds": {}, "characters": {}, "model_dir": used_dir}
 
-    # 通用背景
+    # 通用背景：先问库，没有再自绘
     bg_prompt = os.environ.get(
         "BG_PROMPT",
         "anime style background, indoor room, clean composition, soft lighting, high quality, no people",
     )
-    bg_path = _gen_image(bg_prompt, "bg_scene.png", force=force)
+    hit = _library_hit(bg_prompt)
+    if hit and not force:
+        print(f"[assets] 背景命中素材库：{hit['name']}")
+        bg_path = _copy_into_assets(hit["path"], "bg_scene.png")
+    else:
+        bg_path = _gen_image(bg_prompt, "bg_scene.png", force=force)
+        _remember(bg_path, ["background", "背景", "场景", "scene"])
     assets["background"] = bg_path
 
     # 有场景描述的镜头单独出背景（同一描述自动复用）
@@ -356,11 +404,13 @@ def generate_scene_assets(script_struct: dict, force: bool = False) -> Dict:
         if not desc:
             continue
         key = text_key(desc)
-        path = _gen_image(
-            f"anime style background, {desc}, no people, clean composition, high quality",
-            f"bg_scene_{scene['scene_id']}_{key}.png",
-            force=force,
-        )
+        prompt = f"anime style background, {desc}, no people, clean composition, high quality"
+        hit = _library_hit(prompt)
+        if hit and not force:
+            path = _copy_into_assets(hit["path"], f"bg_scene_{scene['scene_id']}_{key}.png")
+        else:
+            path = _gen_image(prompt, f"bg_scene_{scene['scene_id']}_{key}.png", force=force)
+            _remember(path, ["background", "背景", desc[:24]])
         assets["backgrounds"][int(scene["scene_id"])] = path
 
     # 角色立绘
@@ -372,10 +422,16 @@ def generate_scene_assets(script_struct: dict, force: bool = False) -> Dict:
             "anime style, full body character of {char}, standing, plain white background, "
             "front view, clean lineart, high quality, no shadow on background",
         ).format(char=char)
-        raw_path = _gen_image(char_prompt, raw_name, force=force)
         png_path = os.path.join(_ASSET_DIR, f"char_{safe}.png")
-        if force or not os.path.exists(png_path) or os.path.getsize(png_path) == 0:
-            _cutout_offline(raw_path, png_path)
+        hit = _library_hit(char_prompt)
+        if hit and not force:
+            print(f"[assets] 角色 {char} 命中素材库：{hit['name']}")
+            png_path = _copy_into_assets(hit["path"], f"char_{safe}.png")
+        else:
+            raw_path = _gen_image(char_prompt, raw_name, force=force)
+            if force or not os.path.exists(png_path) or os.path.getsize(png_path) == 0:
+                _cutout_offline(raw_path, png_path)
+            _remember(png_path, [char, "character", "立绘", "portrait"])
         assets["characters"][char] = os.path.abspath(png_path)
 
     return assets

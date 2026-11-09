@@ -157,27 +157,85 @@ def _concat_audio(files: List[str], out_wav: str) -> str:
     return out_wav
 
 
-def _build_clip(frame_path: str, audio_path: str, duration: float, out_path: str) -> None:
+def _mix_sfx(base_wav: str, sfx_wav: str, duration: float, out_wav: str) -> str:
+    """把音效铺到台词下面（amix，时长以台词为准）。
+
+    音效默认从 0 秒开始铺满整句，音量压到 0.55 —— 环境音要能听见但不抢台词。
+    """
+    if not os.path.exists(sfx_wav):
+        return base_wav
+    _run([
+        ffmpeg_path(), "-y",
+        "-i", base_wav,
+        "-stream_loop", "-1", "-i", sfx_wav,
+        "-filter_complex",
+        "[1:a]volume=0.55,atrim=duration=%.3f[s];[0:a][s]amix=inputs=2:duration=first:dropout_transition=0[a]"
+        % max(0.2, duration),
+        "-map", "[a]", "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
+        "-t", f"{max(0.2, duration):.3f}", out_wav,
+    ], "音效混音")
+    return out_wav
+
+
+def _build_clip(frame_path: str, audio_path: str, duration: float, out_path: str,
+                anim: dict = None, sfx: str = None) -> None:
+    """编码单个镜头。
+
+    anim 给了就用 PNG 序列（角色有动作），否则退回静帧。
+    sfx 给了就先跟台词混成一条音轨。
+    """
     enc = resolve_encoder()
-    cmd = [ffmpeg_path(), "-y",
-           "-loop", "1", "-framerate", FPS, "-i", frame_path,
-           "-i", audio_path,
-           "-vf", f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-                  f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1",
-           "-c:v", enc]
+    if sfx:
+        audio_path = _mix_sfx(audio_path, sfx, duration,
+                              os.path.join(_CLIP_DIR, f"fx_{os.path.basename(out_path)}.wav"))
+
+    cmd = [ffmpeg_path(), "-y"]
+    if anim and anim.get("files"):
+        fps = int(anim.get("fps") or 24)
+        files = anim["files"]
+        # 帧序列不够长就循环铺满（成片时长以配音为准，不能靠动画长度）
+        need = max(1, int(round(duration * fps)))
+        seq = []
+        while len(seq) < need:
+            seq.extend(files)
+        seq = seq[:need]
+        lst = os.path.join(_CLIP_DIR, f"anim_{os.path.basename(out_path)}.txt")
+        with open(lst, "w", encoding="utf-8") as f:
+            for p in seq:
+                f.write("file '" + p.replace("'", "'\\''") + "'\n")
+        cmd += ["-r", str(fps), "-f", "concat", "-safe", "0", "-i", lst,
+                "-i", audio_path,
+                "-vf", f"fps={FPS},scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                       f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"]
+    else:
+        cmd += ["-loop", "1", "-framerate", FPS, "-i", frame_path,
+                "-i", audio_path,
+                "-vf", f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                       f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"]
+
+    cmd += ["-c:v", enc]
     cmd += hardware.encoder_quality_args(enc, _quality_for(enc))
-    cmd += ["-pix_fmt", "yuv420p", "-r", FPS,
+    # 音频短于镜头时长时补静音（apad），不要用 -shortest ——
+    # 台词总长比镜头时长少一点留白，-shortest 会把整个镜头截短。
+    cmd += ["-af", "apad", "-pix_fmt", "yuv420p", "-r", FPS,
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-            "-t", f"{duration:.3f}", "-shortest", out_path]
+            "-t", f"{duration:.3f}", out_path]
     _run(cmd, f"镜头片段编码（{enc}）")
 
 
 def export_final_video(script_struct: dict, frames: Dict[int, str], tts_audio: Dict[int, list],
-                       out_path: str) -> str:
-    """按镜头拼接画面 + 配音，输出成片，返回绝对路径。"""
+                       out_path: str, anims: Dict[int, dict] = None,
+                       sfx_map: Dict[int, str] = None) -> tuple:
+    """按镜头拼接画面 + 配音，输出成片，返回 (绝对路径, 时长)。
+
+    anims   可选：{scene_id: {"files": [...], "fps": 24}}，给了就导动态镜头；
+    sfx_map 可选：{scene_id: 音效 wav 路径}，给了就垫在台词下面。
+    """
     if not script_struct.get("scenes"):
         raise ValueError("剧本为空，无法导出")
 
+    anims = anims or {}
+    sfx_map = sfx_map or {}
     clip_list: List[str] = []
     total_expect = 0.0
 
@@ -207,7 +265,8 @@ def export_final_video(script_struct: dict, frames: Dict[int, str], tts_audio: D
             audio_path = _concat_audio(audio_files, os.path.join(_CLIP_DIR, f"audio_{scene_id}.wav"))
 
         clip_path = os.path.join(_CLIP_DIR, f"clip_{scene_id}.mp4")
-        _build_clip(frame_path, audio_path, dur, clip_path)
+        _build_clip(frame_path, audio_path, dur, clip_path,
+                    anim=anims.get(scene_id), sfx=sfx_map.get(scene_id))
         clip_list.append(clip_path)
         total_expect += dur
 

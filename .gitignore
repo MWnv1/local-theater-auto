@@ -17,8 +17,12 @@ cache/
 output/
 _tools/
 tools/
+library/
 *.log
 *.tmp
+
+# ---- 内部计划 / 草稿 ----
+.trae/
 
 # ---- 模型权重 / 大文件 ----
 models/

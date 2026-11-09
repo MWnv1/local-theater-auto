@@ -3,6 +3,93 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.0] - 2026-11-09
+
+从"图片 + 系统配音 + 硬编成片"升级为**全本地 AI 生产管线**：声音克隆替掉 Windows SAPI、
+人物有骨骼绑定会动、能按参考视频生成相似视频、音效库与素材库、剧本生成模型、LobeHub 对话客户端。
+
+### Added
+
+- `theater/tts_clone.py`：F5-TTS 1.1.22 的声音克隆。`ENGINE=auto` 时有权重就走 clone、
+  缺参考音或参考文字时自动回落 SAPI。含 `cache_key()`（把参考音频的绝对路径 + 大小一起进
+  key，换参考音不会误命中旧缓存）、`_vocoder_local_path()`、`_patch_f5_audio_io()`
+  （把 `torchaudio.load` 换成 soundfile，绕开 torchcodec 对共享版 ffmpeg 的依赖）、
+  `status()`、`parse_voice_map()`。
+- `theater/rigging.py`：解剖先验的 2D 伪骨骼。按 alpha 包围盒切 头/躯干/双臂/双腿，
+  每部件记 bbox + 关节 pivot + z 序，落 `rig.json`；同一张图两次 build 签名一致。
+- `theater/animator.py`：`ACTIONS`（idle/nod/wave/walk/talk）、`pose_at(action, t)` 纯函数、
+  `render_frame()`、`render_clip()`（写 PNG 序列 + `clip_manifest.json`，含 `joint_tracks`）、
+  `frame_diff()`。
+- `theater/library.py`：素材/音效库。sha256 去重入库、`index.json` 索引、中英同义词检索
+  （`search` / `pick_for_prompt`）、9 种现场合成音效（rain/whoosh/click/typing/door/thud/
+  incoming/heartbeat/chime）、`mix_sfx()` amix 叠轨、`ensure_builtin_sfx()`、`stats()`。
+- `theater/video_ref.py`：参考视频 → 相似视频。`analyze_reference()` / `plan_frames()`
+  （超上限就等间隔抽帧再复制回原帧率，保住时长）/ `edge_iou()`（相似度量）/ `_restyle()`
+  （SD1.5 img2img）/ `generate_similar_video()` / `similarity_report()`。
+- `theater/frame_compose.py`：新增 `compose_actor_frame()` —— 用"某一时刻带动作的角色图"
+  合成整帧 1920×1080 并叠字幕；站位不认识时按居中回落，不报错。
+- `pipeline_full.py`：`STEPS` 扩到 `parse → assets → tts → sfx → anim → frames → video`；
+  新增 `build_sfx()`（台词关键词 → 内置音效，命中不了再问库）、`build_anims()`
+  （发言角色 `talk`、其余 `idle`/`nod`，时长以该镜头配音总时长为准）、`_sfx_name_for()`。
+- `pipeline_full.py`：剧本模型双后端。`LLM_BACKEND=auto|torch|openvino`，torch 读
+  `MODEL_ROOT/qwen3-4b`（bf16 + `apply_chat_template(enable_thinking=False)`），
+  OpenVINO 按 `_ov_device()` NPU→GPU→CPU 逐级挑真实存在的设备。
+- `server.py`：MCP 工具 8 → 13，新增 `theater_clone_voice`、`theater_animate_character`、
+  `theater_generate_similar_video`、`theater_library_search`、`theater_make_sfx`；
+  `theater_export_video` 增加 `animate` 开关并把 `sfx`/`anim` 步骤纳入默认链路。
+- `mcp/lobe-mcp.json`：LobeHub 直接可用的 MCP 配置（13 个工具）。
+- `README.md` 第 13 节：六项能力对照、全 D 盘安装、新增环境变量、本机实测、踩坑表、
+  客户端接入、五条复验命令。
+- `tests/test_library.py`、`tests/test_rigging_animator.py`、`tests/test_tts_and_video.py`、
+  `tests/test_integration.py`（新增 28 条，总数 25 → 53）。
+- `_tools/`：`mk_manifests.py`、`fix_deps.py`（缺什么补什么，带 google/triton/deepspeed 黑名单）、
+  `cached_path_shim.py`、`make_ref_voice.py`、`smoke_clone.py`、`probe_*`、
+  `pdl2.py`（分段下载逐段校验 + 整文件 sha256）、`e2e_demo.py`（2 镜头全链路自测）。
+
+### Changed
+
+- `theater/local_tts.py`：SAPI 发音人映射改名 `SAPI_VOICE_MAP`（`TTS_VOICE_MAP` 专供克隆引擎，
+  值是参考音频文件名），两者不再撞车；`gen_all_tts()` 在 clone 可用时整体委托给 `tts_clone`。
+- `theater/video_export.py`：`_build_clip()` 支持 PNG 序列（帧数不够自动循环铺满）与音效垫底；
+  `export_final_video(..., anims=None, sfx_map=None)` 返回 `(path, duration)`。
+- `theater/ai_draw.py`：`LIBRARY_FIRST`（默认开）。通用背景 / 每镜头背景 / 角色立绘
+  都改成"先查库、命中就复制、否则自绘并把产物入库"，跑得越久复用率越高。
+- `check_env.py`：新增克隆链依赖、F5 权重、vocos、SD1.5、Qwen3-4B（torch/OV 双查）、
+  配音引擎、骨骼动作、素材库、参考视频重绘等检查项。
+- `requirements.txt`：补声音克隆整条依赖链与三条硬约束（`--no-deps`、`datasets==3.6.0`、
+  `cached_path` 用 shim），以及 SD1.5 和 Qwen3-4B 的落地说明。
+
+### Fixed
+
+- `theater/library.py::_synth_samples("typing")`：末尾 burst 切片短于数组长度，
+  会 `ValueError: operands could not be broadcast together`；改为按 `n - ln` 取起点。
+- `theater/video_export.py::_build_clip()`：concat demuxer 不认 `-framerate`
+  （那是 image2 的选项），改 `-r <fps>`；`-shortest` 会把镜头截到较短音轨长度
+  （本机实测 6.0 s 被截成 4.7 s），改为 `-af apad` + `-t <时长>`。
+- `server.py`：mcp 2.x 把 `FastMCP` 改名成 `MCPServer`（`mcp.server.mcpserver`），
+  改为先试 1.x 再 fallback，两代都能起。
+- 补 `D:\ai_models\sd15-base\feature_extractor\preprocessor_config.json`
+  （只下了 unet/vae/text_encoder 时 diffusers 会报 `Can't load image processor`）。
+
+### Verified
+
+- `python -m unittest discover -s tests` → **53 tests OK**。
+- 声音克隆：参考音 `cache/voices/zhou_ref.wav`（822,014 B，SAPI 合成）+ 同名 `.txt`；
+  单句 22.3 s（含首次加载），产物 24 kHz / mono / pcm_s16le / 5.696 s；
+  批量 2 句 12.4 s（模型常驻），`engine=clone`。
+- 骨骼：512×512 立绘 → 6 部件 7 关节，签名 `4a096c50a50e`；`wave` 2 s / 24 fps 渲 48 帧。
+- 全链路（`_tools/e2e_demo.py`，2 镜头）：克隆配音 + 音效（click/typing）+ 144 帧动画
+  → `cache/demo_animated.mp4`：6.02 s / 1920×1080 / 30 fps / 180 帧 / 1,128,400 B，
+  h264_nvenc 编码 5.1 s；抽 0.2 s 与 1.0 s 两帧 `mean_abs_diff=0.426`、0.88% 像素在动
+  —— 人物确实在动，不是静帧。
+- 剧本生成：Qwen3-4B bf16 在本机 15.9 GB 显存全量驻留，加载 147 s、生成 6 镜头 32 s。
+- 参考视频 → 相似视频：拿 6.02 s 的成片当参考，抽 24 帧逐帧 img2img（strength 0.45 /
+  8 步 / 先缩到 512 再放大回原尺寸），**24.2 s** 出 `cache/similar_demo.mp4`
+  （6.0 s / 30 fps / 1920×1080 / 180 帧 / 保留原音轨）。`similarity_report()`：
+  时长偏差 **0.0%**、fps 一致、分辨率一致、边缘 IoU 均值 **0.344**（strength 0.45
+  本来就会改掉细节纹理，IoU 只用来判"构图没漂"，不是像素级复刻指标）。
+- 素材库：9 个内置音效入库 0.7 MB，`library.stats()` 可查；检索「下雨 雨声」命中 `rain`。
+
 ## [1.3.0] - 2026-11-08
 
 全 D 盘安装 + 首次真机跑通（Python 3.12 / CUDA torch / 带 NVENC 的 ffmpeg / FLUX 权重全部落在 D 盘）。

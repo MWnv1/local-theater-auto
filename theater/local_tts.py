@@ -12,15 +12,20 @@
 # software or exposing it as a network service obliges you to offer all users
 # the complete corresponding source of your modified version (AGPL section 13).
 
-"""离线系统配音（pyttsx3 / Windows SAPI5）。
+"""离线配音。
 
-修复的重点：
+两套引擎，一套入口：
+  * clone —— F5-TTS zero-shot 声音克隆（`theater/tts_clone.py`），有参考音频时优先；
+  * sapi  —— Windows SAPI5（pyttsx3）兜底，零模型依赖。
+
+SAPI 这一路的修复重点（原稿遗留问题，仍然生效）：
 1. 原始稿在同一个 engine 上连续 `save_to_file` 再一次性 `runAndWait()`，
    Windows SAPI5 下经常只有第一句写出、其余是 0 字节（表现为后面镜头静音，
    且时长解析回落到默认 3.0s）。这里改为**每句独立新建 engine**。
 2. 写出后校验文件大小，0 字节自动重试一次，仍失败则抛异常而不是静默返回。
 3. 文件名带文本哈希，台词改了不会命中旧音频。
-4. 支持按角色指定发音人（环境变量 TTS_VOICE_MAP），便于区分人物音色。
+4. SAPI 发音人用 `SAPI_VOICE_MAP` 指定（形如 `小周=Huihui`）；
+   `TTS_VOICE_MAP` 留给克隆引擎，值是**参考音频文件名**，两者不要混用。
 """
 
 import os
@@ -34,8 +39,8 @@ _lock = threading.Lock()
 
 TTS_RATE = int(os.environ.get("TTS_RATE", "180"))
 TTS_VOICE = os.environ.get("TTS_VOICE", "").strip()
-# 形如 "小林=Microsoft Huihui,阿杰=Microsoft Kangkang"
-_RAW_MAP = os.environ.get("TTS_VOICE_MAP", "").strip()
+# 形如 "小林=Microsoft Huihui,阿杰=Microsoft Kangkang"（SAPI 发音人名字片段）
+_RAW_MAP = os.environ.get("SAPI_VOICE_MAP", "").strip()
 VOICE_MAP: Dict[str, str] = {}
 if _RAW_MAP:
     for pair in _RAW_MAP.split(","):
@@ -101,11 +106,21 @@ def _text_to_audio(text: str, filename: str, character: str = "", force: bool = 
     return os.path.abspath(out_path)
 
 
-def gen_all_tts(script_struct: dict, force: bool = False) -> Dict:
+def gen_all_tts(script_struct: dict, force: bool = False,
+                voice_map: Optional[Dict[str, str]] = None) -> Dict:
     """批量生成台词音频。
 
+    默认优先走克隆引擎（有参考音频的角色用克隆，没有的自动退 SAPI）；
+    `TTS_ENGINE=sapi` 时整条走 SAPI。
     返回：{scene_id: [{"character","text","audio_path","index"}, ...]}
     """
+    from . import tts_clone
+
+    if tts_clone.resolve_engine() == "clone":
+        print("[tts] 使用 F5-TTS 声音克隆（无参考音频的角色自动退 SAPI）")
+        return tts_clone.gen_all_tts(script_struct, voice_map, force=force)
+
+    print("[tts] 使用 Windows SAPI5")
     audio_map: Dict[int, list] = {}
     for scene in script_struct.get("scenes", []):
         scene_id = int(scene["scene_id"])
