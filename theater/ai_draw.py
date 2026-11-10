@@ -165,6 +165,8 @@ def _load_torch_pipe(device: str, model_dir: Optional[str] = None):
     import torch
     from diffusers import DiffusionPipeline
 
+    from . import accelerator
+
     target = model_dir or TORCH_MODEL_DIR
     dev = (device or "").strip().lower()
     offload_mode = os.environ.get("FLUX_OFFLOAD", "auto").strip().lower()
@@ -176,7 +178,9 @@ def _load_torch_pipe(device: str, model_dir: Optional[str] = None):
         dtype = torch.float16
     elif dev.startswith("cuda") and torch.cuda.is_available():
         torch_dev = dev
-        dtype = torch.bfloat16
+        # 精度按本机档位（≥12GB 用 bf16，否则 fp16），并打开 TF32 / Tensor Core
+        accelerator.apply_global()
+        dtype = accelerator.sd_kwargs()["torch_dtype"]
     else:
         torch_dev = "cpu"
         dtype = torch.float32

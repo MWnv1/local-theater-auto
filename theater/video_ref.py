@@ -451,14 +451,17 @@ def _sd_available() -> bool:
 
 
 def _get_pipe():
-    """SD1.5 img2img 管道（fp16 常驻，16 GB 显存绰绰有余）。"""
+    """SD1.5 img2img 管道（精度与 attention 内核按本机配置挑，见 accelerator）。"""
     global _pipe
     if _pipe is not None:
         return _pipe
     import torch
     from diffusers import StableDiffusionImg2ImgPipeline
 
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    from . import accelerator
+
+    accel = accelerator.apply_global()
+    dtype = accelerator.sd_kwargs()["torch_dtype"]
     _pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
         SIM_SD_MODEL, torch_dtype=dtype, safety_checker=None, requires_safety_checker=False,
         local_files_only=True,
@@ -468,6 +471,9 @@ def _get_pipe():
     _pipe.set_progress_bar_config(disable=True)
     if device == "cuda":
         _pipe.enable_attention_slicing()
+        applied = accelerator.optimize_pipe(_pipe)
+        print(f"[accel] SD1.5 {str(dtype).replace('torch.', '')} / {device}"
+              f" / attention={accel['attention']} / channels_last={applied['channels_last']}")
     return _pipe
 
 

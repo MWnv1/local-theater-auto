@@ -251,6 +251,16 @@ def check_new_capabilities():
         f"分析尺度 {video_ref.MOTION_SIZE}px，AI 分析={'开' if video_ref.MOTION_LLM_ON else '关'}，"
         f"运动作 init={'开' if video_ref.MOTION_WARP_ON else '关'}")
 
+    from theater import accelerator
+
+    accel = accelerator.status()
+    add(OK if accel["plan"]["enabled"] else WARN, "GPU 加速/量化档位", accel["text"])
+    accelerator.apply_global()          # 先开 TF32，否则测出来的 fp32 还是关 Tensor Core 的数
+    tflops = accelerator.tensor_tflops(measure=True)
+    if tflops:
+        add(OK, "Tensor Core 实测（4096³ matmul）",
+            f"fp32 {tflops.get('fp32')} / fp16 {tflops.get('fp16')} / bf16 {tflops.get('bf16')} TFLOP/s")
+
 
 def check_fonts_and_tts():
     try:

@@ -216,6 +216,9 @@ def _get_f5():
         import torch
         from f5_tts.api import F5TTS
 
+        from . import accelerator
+
+        accelerator.apply_global()          # F5 是 fp32 权重，靠 TF32 吃 Tensor Core
         device = TTS_DEVICE
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"

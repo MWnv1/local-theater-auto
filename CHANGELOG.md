@@ -3,6 +3,44 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.5.0] - 2026-11-10
+
+加入 CUDA / Tensor Core 调用与"按本机配置"的量化。默认行为更省显存、更快，
+且全部可关（`ACCEL=off` 退回 torch 默认）。
+
+### Added
+
+- `theater/accelerator.py`（新模块）：硬件画像（GPU / 显存 / sm 计算能力 / torch / CUDA /
+  CPU / RAM）、按显存分档（`xl` ≥24GB、`high` ≥12GB、`mid` ≥8GB、`low`、`cpu`）、
+  `apply_global()` 打开 TF32 与 `cudnn.benchmark`、`_pick_attention()` **实跑**探测
+  SDPA 内核（flash → mem_efficient → math）、`llm_kwargs()` 返回带
+  `BitsAndBytesConfig`（NF4 4bit + double quant，8bit 可选）的加载参数、
+  `sd_kwargs()` / `optimize_pipe()`（channels_last）、`tensor_tflops()` 实测吞吐、
+  `describe()` / `status()`。
+- 新环境变量：`ACCEL`、`ACCEL_LLM_QUANT`、`ACCEL_SD_DTYPE`、`ACCEL_TF32`。
+- `tests/test_accelerator.py`：10 条单测（档位与显存一致、报出来的 attention 内核真能跑、
+  `apply_global()` 幂等且 `float32_matmul_precision=high`、GPU 上 `llm_kwargs()` 必带量化配置、
+  `ACCEL=off` 全关、Tensor Core 实测为正、`optimize_pipe()` 容错）。
+- `check_env.py` 新增两项："GPU 加速/量化档位"（打印 GPU/显存/sm/档位/精度/内核/TF32/LLM 量化）
+  与"Tensor Core 实测（4096³ matmul）"（fp32/fp16/bf16 的 TFLOP/s）。
+
+### Changed
+
+- `pipeline_full.py::_load_llm`：改用 `accelerator.llm_kwargs()`，剧本模型默认按档位走
+  NF4 4bit（Qwen3-4B 显存 7.49 GB → **2.48 GB**），加载前打印量化说明。
+- `theater/video_ref.py::_get_pipe`：dtype 与 attention 内核由 accelerator 给，新增
+  `channels_last`，日志打印实际生效项。
+- `theater/ai_draw.py::_load_torch_pipe`：不再硬编码 bf16，按档位取精度并先 `apply_global()`。
+- `theater/tts_clone.py::_ensure_f5`：F5 加载前 `apply_global()`，fp32 权重吃 TF32。
+- `README.md` 新增 §14（档位表、四条接线、实测表、踩坑），§13.7 测试数改 83。
+
+### Fixed
+
+- 探测 attention 内核时 torch 会为每个不可用内核刷 6 行 `UserWarning`，用
+  `warnings.catch_warnings()` 压掉，避免每次导入都污染日志。
+- `check_env.py` 的 Tensor Core 实测原本在 `apply_global()` 之前跑，fp32 报出的是
+  "没开 TF32"的数（16.7 TFLOP/s）；现在先开 TF32 再测（24.5 TFLOP/s）。
+
 ## [1.4.1] - 2026-11-10
 
 人物动作收窄成"只做左右平移 / 上下平移 / 旋转"；参考视频 → 相似视频改成

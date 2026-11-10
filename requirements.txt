@@ -104,3 +104,17 @@ comtypes>=1.2.0; sys_platform == "win32"
 # 硬编码需要对应构建：h264_nvenc 要 NVIDIA 驱动 + 带 NVENC 的 ffmpeg；
 # h264_amf 要 AMD 驱动 + 带 AMF 的 ffmpeg；h264_qsv 要 Intel 核显/Arc。
 # 一个都没有时自动回退 libx264（软编，慢但一定能出片）。
+
+# ===========================================================================
+# CUDA / Tensor Core 加速与量化（1.5.0）
+# ===========================================================================
+# 剧本模型（Qwen3-4B）默认按显存档位走 NF4 4bit；没有 bitsandbytes 时
+# theater/accelerator.py 会自动退回全量 bf16，不会崩。
+# 本机实测：RTX 5060 Ti 16G + torch 2.9.1+cu128 上 NF4 内核正常，
+# 显存 7.49GB -> 2.48GB，生成速度不掉（2.6 -> 2.7 tok/s）。
+# Windows 安装（清华镜像，约 40MB 轮子）：
+#   pip install -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple bitsandbytes
+bitsandbytes>=0.43
+
+# 环境变量：ACCEL=auto|on|off、ACCEL_LLM_QUANT=auto|4bit|8bit|none、
+#          ACCEL_SD_DTYPE=auto|fp16|bf16、ACCEL_TF32=1|0

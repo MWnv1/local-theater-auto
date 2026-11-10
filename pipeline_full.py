@@ -87,16 +87,15 @@ def _load_llm():
         return backend, _llm, _tok
 
     if backend == "torch":
-        import torch
+        from theater import accelerator
+
+        accelerator.apply_global()
+        kw, quant_note = accelerator.llm_kwargs()
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         _tok = AutoTokenizer.from_pretrained(LLM_TORCH_DIR)
-        _llm = AutoModelForCausalLM.from_pretrained(
-            LLM_TORCH_DIR,
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-            device_map="cuda" if torch.cuda.is_available() else "cpu",
-            low_cpu_mem_usage=True,
-        )
+        print(f"[llm] {quant_note}")
+        _llm = AutoModelForCausalLM.from_pretrained(LLM_TORCH_DIR, **kw)
         _llm.eval()
     else:
         from optimum.intel.openvino import OVModelForCausalLM

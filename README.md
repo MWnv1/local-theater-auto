@@ -667,9 +667,105 @@ Start-Process "D:\downloads\LobeHub-2.3.2-setup.exe" -ArgumentList "/S","/D=D:\L
 cd D:\AI_T_MCP
 $py = "D:\AI_T_MCP\.venv312\Scripts\python.exe"
 & $py check_env.py                        # 期望 FAIL 0 项
-& $py -m unittest discover -s tests       # 期望 73/73 OK
+& $py -m unittest discover -s tests       # 期望 83/83 OK
 & $py _tools\smoke_clone.py               # 克隆一句，真出 wav
 & $py _tools\e2e_demo.py                  # 2 镜头全链路 → cache\demo_animated.mp4
 & $py _tools\probe_similar.py             # 参考视频 → 逐帧偏移 + 相似视频 + 相似度报告
 & $py _tools\probe_motion.py              # 已知位移校准 frame_offset（四处 expect 对照）
+& $py _tools\probe_tf32.py                # TF32 开/关 + Tensor Core 三种精度 TFLOP/s
+& $py _tools\probe_llm_quant.py           # LLM 4bit 与 bf16 的加载耗时 / 显存 / tok/s
 ```
+
+## 14. CUDA / Tensor Core 加速与按机器配置的量化（1.5.0）
+
+这一层在 `theater/accelerator.py`，只做三件事，而且全都能关掉（`ACCEL=off` 就退回 torch 默认）。
+
+### 14.1 三件事
+
+1. **打开 Tensor Core**：`float32_matmul_precision("high")`（fp32 走 TF32）、
+   `matmul.allow_tf32` / `cudnn.allow_tf32`、`cudnn.benchmark`、fp16/bf16 归约允许降精度。
+2. **挑一个真跑得通的 attention 内核**：`flash → mem_efficient → math` 逐个**实跑探测**
+   （不是看开关），把结果记进 profile；探测时用 `warnings.catch_warnings()` 压掉 torch
+   每个内核的六行原因说明，不然每次导入都刷屏。
+3. **按显存选量化档位**：见 14.2。
+
+### 14.2 档位表（`accelerator.plan()["tier"]`）
+
+| 显存 | tier | 权重精度 | attention | LLM 量化 |
+|---|---|---|---|---|
+| ≥ 24 GB | `xl` | bf16 全量驻留 | flash（能跑就用） | 默认不量化（可 `ACCEL_LLM_QUANT=4bit`） |
+| ≥ 12 GB | `high` | bf16 | mem_efficient | **NF4 4bit**（double quant，算用 bf16） |
+| ≥ 8 GB | `mid` | fp16 | mem_efficient | NF4 4bit |
+| < 8 GB | `low` | fp16 | math | NF4 4bit |
+| 无 CUDA | `cpu` | fp32 | math | 不量化 |
+
+本机（RTX 5060 Ti 15.9 GB / sm_120）落在 `high`：
+`权重 bf16、attention mem_efficient、TF32 开、LLM 4bit`。
+
+### 14.3 接线到了哪四条推理路径
+
+| 路径 | 文件 | 接了什么 |
+|---|---|---|
+| FLUX 出图 | `theater/ai_draw.py::_load_torch_pipe` | dtype 由档位给（不再硬编码 bf16），先 `apply_global()` |
+| SD1.5 重绘 | `theater/video_ref.py::_get_pipe` | dtype 由档位给、`channels_last`、日志打印实际 attention 内核 |
+| 剧本 LLM | `pipeline_full.py::_load_llm` | `accelerator.llm_kwargs()` 返回**带 `BitsAndBytesConfig` 的 kwargs**，加载前打印量化说明 |
+| 克隆 TTS | `theater/tts_clone.py::_ensure_f5` | `apply_global()`（F5 是 fp32 权重，靠 TF32 吃 Tensor Core） |
+
+`ACCEL=off`、没有 CUDA、`bitsandbytes` 导入失败，这三种情况都会**自动退回**全量精度，
+不会因为缺依赖直接崩。
+
+### 14.4 环境变量
+
+| 变量 | 取值 | 作用 |
+|---|---|---|
+| `ACCEL` | `auto`/`on`/`off` | 总开关，`off` 完全不改 torch 全局状态 |
+| `ACCEL_LLM_QUANT` | `auto`/`4bit`/`8bit`/`none` | 剧本模型量化方式，`auto` 按档位 |
+| `ACCEL_SD_DTYPE` | `auto`/`fp16`/`bf16`/`fp32` | 扩散模型权重精度 |
+| `ACCEL_TF32` | `1`/`0` | 是否允许 fp32 走 TF32 |
+
+### 14.5 本机实测（RTX 5060 Ti 16G、torch 2.9.1+cu128、Windows 11）
+
+**Tensor Core 吞吐（4096³ matmul，5 次平均）**
+
+| 精度 | 不开加速 | 开加速（TF32/bf16） | 说明 |
+|---|---|---|---|
+| fp32 | 16,361.7 GFLOPS | **24,544.2 GFLOPS**（1.50×） | TF32 生效的倍数 |
+| fp16 | — | 49,084.7 GFLOPS | Tensor Core |
+| bf16 | — | 49,085.6 GFLOPS | Tensor Core |
+
+**SDPA 内核**：flash **不可用**（`RuntimeError: No available kernel. Aborting execution.`，
+torch 只提示"Torch was not compiled with flash attention"，cuDNN attention 被 runtime disabled），
+`mem_efficient` 与 `math` 可用 → 实测选 `mem_efficient`。
+
+**剧本模型量化（Qwen3-4B，同一段 2 镜头需求，贪心解码）**
+
+| 方式 | 加载耗时 | 显存占用 | 生成速度 |
+|---|---|---|---|
+| NF4 4bit（bf16 计算） | 82.4 s | **2.48 GB** | 2.7 tok/s |
+| bf16 全量 | 92.8 s | 7.49 GB | 2.6 tok/s |
+
+结论：本机 4bit **省 5 GB 显存、加载更快、速度不掉**，所以 `high` 档默认就开 4bit——
+省出来的显存留给 FLUX/SD 同时驻留。
+
+**相似视频（`pan_ref_full.mp4` → 8 帧）**
+
+| 指标 | 1.4.1（fp16 手写） | 1.5.0（bf16 + channels_last + mem_efficient） |
+|---|---|---|
+| 首帧（含管道加载 + 预热） | 209.9 s | **129.5 s** |
+| 后续每帧 | 0.7 ~ 1.1 s | 0.7 ~ 0.9 s |
+| 整条（8 帧） | 226.4 s | **141.3 s（-37.6%）** |
+| 运动分析结果 | 向左平移 58.9 px/帧，conf 0.8666 | 完全一致（分析不依赖精度） |
+| 相似度报告 | direction_match=true，speed_ratio=1.027 | 一致 |
+
+**端到端 2 镜头**（`_tools\e2e_demo.py`）：克隆配音 65.7 s、动作 25.5 s、NVENC 5.5 s，
+成片 `cache\demo_animated.mp4` 1,739,433 B / 6.02 s / 1920×1080 / 30 fps。
+
+### 14.6 这一节踩的坑
+
+| 症状 | 原因 | 解法 |
+|---|---|---|
+| flash attention 一用就 `No available kernel` | torch 2.9.1+cu128 没给 sm_120 编 flash 内核，cuDNN attention 也被 runtime disabled | 探测后固定走 `mem_efficient`，并把 flash 的 SDPA 开关关掉，避免每次 attention 先失败一次 |
+| `import torch` 后每个 attention 都打 6 行 `UserWarning` | 探测阶段 torch 会为每个不可用内核解释原因 | 探测循环包 `warnings.catch_warnings()` + `simplefilter("ignore")` |
+| `torch.compile` 想开就报找不到 triton | Windows 上 torch.compile 依赖 triton，本机没装 | `plan()["compile"]=False`，不假装能编译 |
+| 4bit 量化代码写好了但模型还是吃 8 GB | `from_pretrained` 只传了 `torch_dtype`，没传 `quantization_config` | `llm_kwargs()` 直接返回 `BitsAndBytesConfig`，加载处 `**kw` 展开，并在日志里打印实际方式 |
+| 显存够却仍然 OOM | LLM 与 SD 同时驻留 | `high` 档 LLM 走 NF4（2.48 GB），FLUX 仍按 `FLUX_OFFLOAD` 策略 |
