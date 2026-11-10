@@ -228,7 +228,7 @@ def check_models():
 
 
 def check_new_capabilities():
-    """声音克隆 / 骨骼动画 / 素材库 / 参考视频重绘：四项新能力的就绪状态。"""
+    """声音克隆 / 位移旋转动作 / 素材库 / 参考视频重绘：四项新能力的就绪状态。"""
     from theater import library, tts_clone, video_ref
 
     st = tts_clone.status()
@@ -238,7 +238,7 @@ def check_new_capabilities():
 
     from theater import animator, rigging  # noqa: F401
 
-    add(OK, "骨骼绑定/动作", "动作：" + "、".join(sorted(animator.ACTIONS)))
+    add(OK, "整体位移/旋转动作", "动作：" + "、".join(sorted(animator.ACTIONS)))
 
     s = library.stats()
     add(OK if s.get("total") else WARN, "素材/音效库",
@@ -246,6 +246,10 @@ def check_new_capabilities():
 
     ok = video_ref._sd_available()
     add(OK if ok else WARN, "参考视频重绘", "SD1.5 img2img 就绪" if ok else "SD1.5 不可用，只能做分析+复制音轨")
+
+    add(OK, "逐帧运动分析",
+        f"分析尺度 {video_ref.MOTION_SIZE}px，AI 分析={'开' if video_ref.MOTION_LLM_ON else '关'}，"
+        f"运动作 init={'开' if video_ref.MOTION_WARP_ON else '关'}")
 
 
 def check_fonts_and_tts():

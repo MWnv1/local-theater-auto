@@ -437,7 +437,7 @@ D:\AI_T_MCP\.venv312\Scripts\python.exe D:\AI_T_MCP\_tools\probe_flux.py bf16_se
 2. T5 tokenizer 需要 `sentencepiece`，不装会报
    `Cannot instantiate this tokenizer from a slow version`。
 
-## 13. AI 生产管线（克隆配音 / 骨骼动画 / 参考视频重绘 / 素材库 / 剧本模型 / 客户端）
+## 13. AI 生产管线（克隆配音 / 位移旋转动作 / 参考视频重绘 / 素材库 / 剧本模型 / 客户端）
 
 第 1–12 节做的是"图片 + 系统配音 + 硬编成片"。这一节把整条链路换成本地 AI 生产：
 声音克隆替掉 SAPI、人物真的会动、能按参考视频生成相似视频、出图和出音都会先问素材库、
@@ -448,13 +448,58 @@ D:\AI_T_MCP\.venv312\Scripts\python.exe D:\AI_T_MCP\_tools\probe_flux.py bf16_se
 | # | 能力 | 模块 | 缺省行为 |
 |---|---|---|---|
 | 1 | 声音克隆替掉 Windows SAPI | `theater/tts_clone.py`（F5-TTS 1.1.22） | 有参考音 → clone；没有参考音或没配套文字 → 自动回落 SAPI |
-| 2 | 人物骨骼绑定、能动 | `theater/rigging.py` + `theater/animator.py` | 按 alpha 切 6 部件 7 关节，动作是 `pose_at(action, t)` 纯函数 |
-| 3 | 按参考视频生成相似视频 | `theater/video_ref.py`（SD1.5 img2img） | 逐帧重绘、保留原音轨、输出相似度报告 |
+| 2 | 人物能动 | `theater/rigging.py` + `theater/animator.py` | 动作只有三种自由度：左右平移 / 上下平移 / 旋转；`pose_at(action, t)` 纯函数，整图 AFFINE 一次成型 |
+| 3 | 按参考视频生成相似视频 | `theater/video_ref.py`（SD1.5 img2img） | 逐帧算"这帧相对上帧的偏移量"→ AI 归纳成画面描述 → 按偏移推 init image 再重绘；保留原音轨并出相似度报告 |
 | 4 | 音效库 + 素材库 | `theater/library.py` | 9 个内置音效现场合成；出图/出音前先查库，命中就复用 |
 | 5 | 剧本生成模型 | `pipeline_full.py::generate_script` | `LLM_BACKEND=auto`：torch 优先，OpenVINO 可选（NPU→GPU→CPU） |
 | 6 | 对话客户端 | LobeHub 2.3.2 + `server.py`（13 个 MCP 工具） | 没装客户端时 MCP 仍可被任意 MCP 客户端调用 |
 
 管线步骤（`pipeline_full.STEPS`）：`parse → assets → tts → sfx → anim → frames → video`
+
+#### 13.1.1 人物动作只有平移和旋转
+
+关节级肢体动画（把立绘按 alpha 连通域切成头/躯干/四肢，再绕关节旋转）在本项目里被
+**主动放弃**：切分依赖抠图质量，立绘边缘毛一点就会把胳膊切成两半，旋转时露出裂缝。
+改成整图仿射后，任何立绘都能动，也不挑素材。
+
+| 动作名 | 自由度 | 幅度 / 周期 |
+|---|---|---|
+| `pan_left` / `pan_right` | 左右平移 | ±0.18 图宽，周期 4.0 s |
+| `pan_up` / `pan_down` | 上下平移 | ±0.16 图高，周期 4.0 s |
+| `rotate` | 往返旋转 | ±10°，周期 3.0 s |
+| `spin` | 同向旋转 | 360°，周期 6.0 s |
+| `idle` / `nod` / `wave` / `walk` / `talk` | 小幅度平移或旋转的别名 | 幅度 1.2%~9%、或 ±1.6°，供老脚本与 `build_anims` 继续使用 |
+
+`pose_at` 返回归一化 `{dx, dy, rot}`（dx/dy 是占图片宽/高的比例），`transform_px` 换算成像素，
+`warp()` 用一次 `Image.AFFINE`（绕中心旋转 + 平移，BICUBIC，透明填充）出帧，避免
+"先 rotate 再 paste"造成的取整抖动与边缘拉丝。`render_clip` 的 manifest 里记
+`motion_tracks`（每帧 `{t, pose, px}`），同时保留 `joint_tracks` 键作为兼容别名。
+
+#### 13.1.2 相似视频必须"逐帧算偏移 → AI 分析 → 再生成"
+
+`generate_similar_video` 的实际顺序（缺一步都算没做到用户要的事）：
+
+1. **抽帧**：按 `SIM_MAX_FRAMES` 预算决定步长，得到待重绘帧序列。
+2. **逐帧算偏移**：`frame_offset(prev, cur)` 缩到 `SIM_MOTION_SIZE` 灰度 → 去均值 + 汉宁窗 →
+   `rfft2` 相位相关出整数位移 → 因不同 FFT 库符号约定会翻，把 `(dx,dy)` 与 `(-dx,-dy)` 都算
+   一遍重叠区归一化相关系数取更像的 → 再在 ±8°、步长 2 内搜旋转并在最优点 ±1° 精修。
+   相关系数直接当 `conf`，切镜/闪白这类帧对会被打低分。位移按分析尺度换算回原片像素。
+3. **AI 分析**：`describe_motion` 把偏移序列归纳成人话（静止 / 向右平移 / 向下平移 + 顺时针旋转…）
+   和一句英文生成提示；`SIM_MOTION_LLM=1` 时再交给本地 Qwen3-4B 改写这句提示
+   （默认关：加载 7.5 GB 权重约 147 s，只在连着跑多段视频时才值）。
+4. **再生成**：`prompt_all = "<用户提示>, <运动提示>"`，逐帧 img2img；
+   `i>0` 且 `SIM_MOTION_WARP=1` 时，init image 用**上一帧的生成图**按本帧偏移推过去
+   （`_warp_prev`），让画风与运动轨迹一路传下去，而不是每帧都从原片重新起手。
+   只有"整帧都在动"才推：`frame_offset` 顺带算 `changed`（像素变化比例），
+   ≥60% 相邻帧几乎不动但仍有 2% 以上像素在变 → 判为 `kind=local`（主体自己在动），
+   此时推整帧会把背景一起带走，所以改回用原帧当 init。
+5. **落盘可核对**：`workdir\motion.json` 存 summary / llm_hint / prompt_used / 全部 offsets；
+   `out_info["motion"]` 带 summary、前 16 条 offsets、`kind` 与 `warped_frames`（真正推了几帧）。
+
+`similarity_report()` 另外给运动一致性：两段视频各抽 6 帧做同样的逐帧分析，
+比较方向点积（`direction_match`）、速度比（`speed_ratio`）与各自累计旋转；
+两边都近乎静止时也算一致。这段包在 try 里，失败只写 `report["motion"]["error"]`。
+
 
 ### 13.2 安装（照抄，全部 D 盘）
 
@@ -481,10 +526,17 @@ cache\voices\zhou_ref.txt   # 这段音频对应的文字
 
 没有 .txt 时程序会尝试 whisper 自动转写并缓存；离线环境转写必然失败，会打一行 warn 后回落 SAPI。
 
-#### 13.2.2 骨骼动画
+#### 13.2.2 人物动作（平移 / 旋转）
 
-无额外依赖（Pillow + numpy 已在基线里）。立绘越干净（透明背景、正面、全身）切分越准，
+无额外依赖（Pillow + numpy 已在基线里）。立绘用透明背景、正面全身最好看，但整图仿射不挑素材，
 `rig.json` 会落在 `cache\rigs\`，同一张图两次 build 签名一致。
+
+直接调：
+
+```powershell
+& $py -c "from theater import animator; print(sorted(animator.ACTIONS)); print(animator.pose_at('pan_right', 1.0))"
+# 或走 MCP：theater_animate_character(action="pan_right", seconds=2)
+```
 
 #### 13.2.3 参考视频重绘（SD1.5）
 
@@ -532,6 +584,9 @@ Start-Process "D:\downloads\LobeHub-2.3.2-setup.exe" -ArgumentList "/S","/D=D:\L
 | `SIM_SD_MODEL` | `MODEL_ROOT/sd15-base` | SD1.5 目录 |
 | `SIM_SIZE` / `SIM_STEPS` / `SIM_STRENGTH` | `512` / `8` / `0.45` | 重绘长边 / 采样步数 / 改动强度 |
 | `SIM_MAX_FRAMES` | `240` | 最多重绘多少帧（超出按等间隔抽帧，再复制回原帧率保住时长） |
+| `SIM_MOTION_SIZE` | `256` | 逐帧偏移分析的分析尺度（长边像素）；越小越快、越抗噪 |
+| `SIM_MOTION_LLM` | `0` | `1` = 让本地 Qwen3-4B 把运动统计改写成一句画面描述；`0` = 用规则模板 |
+| `SIM_MOTION_WARP` | `1` | `1` = 上一帧生成图按本帧偏移推成下一帧 init；`0` = 每帧都用原片 |
 | `THEATER_LIBRARY` | `项目根/library` | 素材库根目录（索引 `index.json`） |
 | `LIBRARY_MIN_SCORE` / `LIBRARY_FIRST` | `0.45` / `1` | 命中阈值 / 是否先查库 |
 | `LLM_BACKEND` | `auto` | `auto/torch/openvino` |
@@ -544,14 +599,21 @@ Start-Process "D:\downloads\LobeHub-2.3.2-setup.exe" -ArgumentList "/S","/D=D:\L
 |---|---|
 | F5-TTS 克隆单句（含首次加载模型） | 22.3 s，16 字 |
 | F5-TTS 批量 2 句（模型已常驻） | 12.4 s，24 kHz mono pcm_s16le，engine=clone |
-| 骨骼绑定（512×512 立绘） | 6 部件 7 关节，签名 `4a096c50a50e`，同图两次 build 一致 |
-| 动画渲染 | 2 镜头共 144 帧（60 + 84），24 fps，24.7 s（含逐帧合成字幕与背景） |
+| 骨骼绑定（512×512 立绘） | 签名 `4a096c50a50e`，同图两次 build 一致（切分仍保留，用于部件级取景） |
+| 位移/旋转动作 | `pan_left` 在 1.0 s 时 dx=-0.18（1000 宽即 -180 px）；`rotate` 在 0.75 s 时 >9°；`spin` 5.9 s 时仍在 0~360° |
+| 逐帧偏移分析（已知位移校准） | 期望 (60,20) → 实测 (60,20) conf 0.918；期望 (-45,0) → (-45,0) conf 0.976；期望 (0,-30) → (0,-30) conf 0.946；期望 rot=6° → 6.0° conf 0.998 |
+| 动画渲染 | 2 镜头共 144 帧（60 + 84），24 fps，27.0 s（含逐帧合成字幕与背景） |
 | 内置音效 | 9 个现场合成入库，0.7 MB，耗时 < 1 s |
-| 成片（2 镜头：克隆配音 + 音效 + 动画） | 6.02 s / 1920×1080 / 30 fps / 180 帧 / 1.13 MB，NVENC 编码 5.1 s |
-| 动作真实性核对 | 抽 0.2 s 与 1.0 s 两帧：mean_abs_diff 0.426，0.88% 像素在动 |
-| 参考视频 → 相似视频（24 帧） | 24.2 s，出片 6.0 s / 30 fps / 1920×1080 / 180 帧 / 保留了原音轨 |
-| 相似度报告 | 时长偏差 0.0%，fps 与分辨率一致，边缘 IoU 均值 0.344 |
-| SD1.5 img2img 单帧 | 512 px 重绘再放大回 1080p ≈ 0.9 s/帧（直接在 1080p 上跑是 75 s/帧） |
+| 成片（2 镜头：克隆配音 + 音效 + 动画） | 6.02 s / 1920×1080 / 30 fps / 180 帧 / 1.74 MB，NVENC 编码 5.2 s |
+| 动作真实性核对（旋转 `rotate`） | 抽 0.2 s 与 1.0 s 两帧：mean_abs_diff 0.0085，3.6% 像素在动 |
+| 动作真实性核对（平移 `pan_right`） | 同法：mean_abs_diff 0.0166，6.8% 像素在动（人物 0.2~1.0 s 内右移约 240 px） |
+| 参考视频 → 相似视频（24 帧，旧版对照） | 24.2 s（当时未做逐帧运动分析），出片 6.0 s / 30 fps / 1920×1080 / 180 帧 / 保留了原音轨 |
+| 参考视频 → 相似视频（8 帧，含逐帧运动分析） | 226.4 s 里首帧 209.9 s（含 SD 管道加载 82 s 与 CUDA 预热）、其余 0.7~1.1 s/帧；出片 3.0 s / 24 fps / 1920×1080 / 保留原音轨 |
+| 相似度报告 | 时长偏差 0.0%，fps 与分辨率一致，边缘 IoU 均值 0.34 |
+| 逐帧运动分析 → 全画面平移参考（8 帧） | 判为 `global` 向左平移 84 px/帧；生成片实测 82.5 px/帧，`direction_match=true`，`speed_ratio=1.027`；7/7 帧用上一帧生成图按偏移推 init |
+| 逐帧运动分析 → 局部动作参考（人物在静态背景里平移） | 判为 `local`（3% 像素在变），不推整帧，改回用原帧当 init |
+| 逐帧运动分析 → 自家动画成片 | 判为 `static`（0.3% 像素在变），阈值不误报 |
+| SD1.5 img2img 稳态单帧 | 512 px 重绘再放大回 1080p：首帧含 CUDA 预热 ~30 s，之后 0.7~1.1 s/帧（直接在 1080p 上跑是 75 s/帧） |
 | 剧本生成（Qwen3-4B bf16） | 加载 147 s + 生成 6 镜头 32 s（合计 179.8 s） |
 | FLUX 出图（基线，供对比） | 512 px ≈ 21 分钟 / 1024 px 1504 s（sequential offload） |
 
@@ -570,6 +632,9 @@ Start-Process "D:\downloads\LobeHub-2.3.2-setup.exe" -ArgumentList "/S","/D=D:\L
 | `ModuleNotFoundError: mcp.server.fastmcp` | mcp 2.x 把 FastMCP 改名成 MCPServer | `server.py` 先试 1.x，失败再 fallback `mcp.server.mcpserver` |
 | pdl.py 下完的安装包哈希不对、装不上 | 分段拼接错乱（大小对、内容错） | 换 `_tools/pdl2.py`：逐段校验长度 + 整文件 sha256，不过就不算下完 |
 | 镜像下大文件 HTTP 429 | 并发太高被限流 | 降到 4 线程 + 429 长退避 + 断点续传 |
+| 测到的旋转角与 `warp()` 转向相反 | PIL `rotate(角度)` 逆时针，而 `warp()` 按图像坐标（y 向下）正方向顺时针 | `_gray_rotated` 里 `im.rotate(-deg)`，让测出来的角度与 warp 同号 |
+| 人物在静止背景里走，逐帧分析却报 0 px | 相位相关看整帧，大面积静态背景把峰值压回 (0,0) | 同时算 `changed` 像素变化比例，≥2% 且整帧没位移 → 判 `local`（主体在动），并按原帧当 init，不推整帧 |
+| 上一帧生成图当 init 导致画风/构图逐帧漂移 | 每帧都把上帧再推一次，误差会累积 | 只在 `kind=global` 且位移 ≥2 px（或旋转 ≥0.8°）、`conf` ≥0.35 时才推；否则回用原帧 |
 
 ### 13.6 客户端接入（LobeHub + MCP）
 
@@ -602,8 +667,9 @@ Start-Process "D:\downloads\LobeHub-2.3.2-setup.exe" -ArgumentList "/S","/D=D:\L
 cd D:\AI_T_MCP
 $py = "D:\AI_T_MCP\.venv312\Scripts\python.exe"
 & $py check_env.py                        # 期望 FAIL 0 项
-& $py -m unittest discover -s tests       # 期望 53/53 OK
+& $py -m unittest discover -s tests       # 期望 71/71 OK
 & $py _tools\smoke_clone.py               # 克隆一句，真出 wav
 & $py _tools\e2e_demo.py                  # 2 镜头全链路 → cache\demo_animated.mp4
-& $py _tools\probe_similar.py             # 参考视频 → 相似视频 + 相似度报告
+& $py _tools\probe_similar.py             # 参考视频 → 逐帧偏移 + 相似视频 + 相似度报告
+& $py _tools\probe_motion.py              # 已知位移校准 frame_offset（四处 expect 对照）
 ```

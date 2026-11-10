@@ -201,10 +201,12 @@ def _scene_subtitle(scene: dict) -> str:
 
 def build_anims(script_struct: dict, assets: dict, tts: Dict[int, list],
                 force: bool = False) -> Dict[int, dict]:
-    """给每个镜头渲染"角色真的在动"的 PNG 序列（骨骼绑定 + 动作函数）。
+    """给每个镜头渲染"角色真的在动"的 PNG 序列（整图平移/旋转，不切肢体）。
 
-    动作分配：本镜头有台词的角色说 `talk`，其余角色交替 `idle` / `nod`。
-    时长以该镜头配音总长为准，保证动作和声音对得上。
+    动作分配：本镜头有台词的角色做小幅旋转 `rotate`（相当于原来的 talk，但幅度
+    按新规格变成 ±10°），其余角色交替 `idle` / `nod`（退化成小幅度上下平移）。
+    想把人物真正"推"到画面另一侧，显式指定 `pan_left` / `pan_right` / `pan_up` /
+    `pan_down` / `spin`。时长以该镜头配音总长为准，保证动作和声音对得上。
     """
     from theater import animator, frame_compose, rigging, video_export
 
@@ -241,7 +243,7 @@ def build_anims(script_struct: dict, assets: dict, tts: Dict[int, list],
             actors = {}
             for name, rig in rigs.items():
                 if name in speakers:
-                    act = "talk"
+                    act = "rotate"
                 else:
                     act = "nod" if (i // max(1, fps)) % 2 == 0 else "idle"
                 actors[name] = animator.render_frame(rig, act, t)

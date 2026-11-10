@@ -24,8 +24,8 @@
     theater_export_video(script_text, out_name) 成片（NVENC/QSV/AMF→自动回退 x264）
     theater_run_all(script_text, out_name)      一键全流程
     theater_clone_voice(text, ref_audio)        参考语音 → 同音色合成新台词
-    theater_animate_character(char_image, ...)  立绘骨骼绑定 + 动作序列渲染
-    theater_generate_similar_video(video, ...)  参考视频 → 相似视频（逐帧 img2img）
+    theater_animate_character(char_image, ...)  立绘整体位移/旋转动作序列渲染
+    theater_generate_similar_video(video, ...)  参考视频 → 逐帧算偏移 + AI 分析 → 相似视频
     theater_library_search(query)               检索素材库（图片 / 音效）
     theater_make_sfx(name)                      合成内置音效并入库存档
 
@@ -223,9 +223,10 @@ def theater_clone_voice(text: str, ref_audio: str, out_name: str = "clone.wav",
 @mcp.tool()
 def theater_animate_character(char_image: str, action: str = "wave", seconds: float = 2.0,
                               fps: int = 24) -> str:
-    """给单张角色立绘做 2D 伪骨骼绑定，并渲染一段动作 PNG 序列。
+    """给单张角色立绘做整体位移/旋转动作，并渲染一段 PNG 序列。
 
-    action 可选 idle / nod / wave / walk / talk。
+    action 可选 pan_left / pan_right / pan_up / pan_down / rotate / spin
+    （idle / nod / wave / walk / talk 作为小幅度平移/旋转的别名保留）。
     """
     try:
         from theater import animator, rigging
@@ -236,7 +237,7 @@ def theater_animate_character(char_image: str, action: str = "wave", seconds: fl
         rig = rigging.rig_for(char_image)
         clip = animator.render_clip(rig, action, float(seconds), int(fps))
         return _ok({"rig": {"signature": rig.get("signature"), "parts": len(rig.get("parts", []))},
-                    "action": action, "clip": clip})
+                    "action": action, "motion": animator.pose_at(action, 0.0), "clip": clip})
     except Exception as e:
         return _err("theater_animate_character", e)
 

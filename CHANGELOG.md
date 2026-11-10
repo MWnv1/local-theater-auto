@@ -3,6 +3,65 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.1] - 2026-11-10
+
+人物动作收窄成"只做左右平移 / 上下平移 / 旋转"；参考视频 → 相似视频改成
+"逐帧算偏移 → AI 分析 → 再生成"。两条都是行为变更，接口保持向后兼容。
+
+### Changed
+
+- `theater/animator.py` **整文件重写**：放弃部件级伪骨骼旋转，改成整图仿射。
+  `ACTIONS` 新增 `pan_left` / `pan_right` / `pan_up` / `pan_down`（周期 4.0 s，
+  幅度 ±0.18 图宽 / ±0.16 图高）、`rotate`（±10°，周期 3.0 s）、`spin`（360°/6.0 s）；
+  旧名 `idle` / `nod` / `wave` / `walk` / `talk` 保留成**小幅度平移/旋转的别名**
+  （amp_y 0.012 / 0.03、amp_x 0.05 / 0.09、rot 1.6°），老脚本与 `build_anims` 不用改。
+- `pose_at(action, t)` 返回值改为归一化 `{dx, dy, rot}`（dx/dy 占图宽高的比例），仍是纯函数；
+  新增 `transform_px(pose, size)` 换算像素，新增 `warp(img, dx, dy, rot)` 用一次性
+  `Image.AFFINE`（绕中心旋转 + 平移，BICUBIC，透明填充）出帧，避免"先 rotate 再 paste"的
+  取整抖动与边缘拉丝。
+- `render_clip()` manifest 新增 `motion_tracks`（每帧 `{t, pose, px}`），
+  保留 `joint_tracks` 键指向同一份数据以兼容旧断言。
+- `theater/video_ref.py` 新增逐帧运动分析整段：`frame_offset(prev, cur)`（缩到
+  `SIM_MOTION_SIZE` 灰度 → 去均值 + 汉宁窗 → `rfft2` 相位相关 → `(dx,dy)` 与 `(-dx,-dy)`
+  两组都算重叠区相关系数取更像的 → ±8°、步长 2 搜旋转再 ±1° 精修）、`describe_motion()`、
+  `analyze_motion()`、`motion_hint_llm()`（可选接本地 Qwen3-4B）、`_warp_prev()`、
+  `motion_signature()`。`frame_offset` 顺带返回 `changed`（像素变化比例）。
+- `generate_similar_video()` 主流程串入：抽帧 → `analyze_motion()` → `[motion]` 日志 →
+  `motion_hint_llm()` 取提示（失败回落规则提示）→ `prompt_all = "<提示>, <运动提示>"` →
+  逐帧重绘；仅当 `kind=global`、位移 ≥2 px（或旋转 ≥0.8°）且 `conf` ≥0.35 时，才把上一帧
+  生成图按本帧偏移推成 init（`SIM_MOTION_WARP`），`local`/`static` 一律回用原帧。
+  `workdir\motion.json` 落 summary / llm_hint / prompt_used / 全部 offsets；
+  `out_info["motion"]` 加 `kind` 与 `warped_frames`。
+- `similarity_report()` 增加运动一致性：两段视频各抽帧做同样分析，比较方向点积
+  （`direction_match`，两边都近乎静止也算一致）、`speed_ratio`、各自累计旋转；
+  失败只写 `report["motion"]["error"]`，不影响时长/帧率/分辨率/边缘 IoU。
+- `pipeline_full.build_anims()`：发言角色由 `talk` 改为 `rotate`（新规格下
+  "说话时轻轻转动"比 1.6° 更明显），其余角色仍 `idle` / `nod`。
+- `server.py`：`theater_animate_character` 文档串与返回体更新（动作列表 + `motion` 摘要）。
+- `check_env.py`：检查项改名"整体位移/旋转动作"，新增"逐帧运动分析"（分析尺度 /
+  AI 分析开关 / 运动作 init 开关）。
+- `README.md` §13：新增 13.1.1（平移/旋转动作表）与 13.1.2（逐帧偏移 → AI 分析 → 生成
+  的五步顺序）、`SIM_MOTION_*` 三个环境变量、校准与端到端实测数字、三条新踩坑。
+
+### Added
+
+- `tests/test_motion.py`：20 条（动作注册与方向、幅度互为相反数、旋转随时间增大、
+  `spin` 角度范围、`pose_at` 纯函数、`transform_px` 换算、`warp` 平移/旋转能被
+  `frame_offset` 同号复现、`analyze_motion` 逐对偏移、向右/静止/顺时针三种归纳、
+  `local` 与 `static` 分类、`changed` 比例、LLM 默认关、`pan_left` 两帧有差异、
+  manifest 的 `motion_tracks`）。总数 53 → 71。
+- `_tools/probe_motion.py`（已知位移校准）、`_tools/probe_motion_similar.py`
+  （逐帧分析 + 相似视频端到端）、`_tools/probe_motion_kind.py`（local/global/static 分类）、
+  `_tools/make_pan_ref.py` / `make_pan_ref_full.py` / `make_pan_show.py`（造参考视频）。
+
+### Fixed
+
+- 旋转角与 `warp()` 转向相反：PIL `rotate(角度)` 逆时针，而 `warp()` 按图像坐标正方向
+  顺时针，`_gray_rotated` 改用 `im.rotate(-deg)` 后，已知 +6° 能测回 +6.0°（conf 0.998）。
+- 大面积静态背景把相位相关峰值压回 (0,0)，人物在画面里走动被测成 0 px：
+  用 `changed` 比例区分 `local`（主体在动）与 `global`（镜头/整体在动），`local` 不再推整帧。
+- 上一帧生成图当 init 的误差累积（生成片自己漂移）：只在 `global` 且位移足够大时推。
+
 ## [1.4.0] - 2026-11-09
 
 从"图片 + 系统配音 + 硬编成片"升级为**全本地 AI 生产管线**：声音克隆替掉 Windows SAPI、
