@@ -49,7 +49,7 @@
   `spin` 角度范围、`pose_at` 纯函数、`transform_px` 换算、`warp` 平移/旋转能被
   `frame_offset` 同号复现、`analyze_motion` 逐对偏移、向右/静止/顺时针三种归纳、
   `local` 与 `static` 分类、`changed` 比例、LLM 默认关、`pan_left` 两帧有差异、
-  manifest 的 `motion_tracks`）。总数 53 → 71。
+  manifest 的 `motion_tracks`）。总数 53 → 73。
 - `_tools/probe_motion.py`（已知位移校准）、`_tools/probe_motion_similar.py`
   （逐帧分析 + 相似视频端到端）、`_tools/probe_motion_kind.py`（local/global/static 分类）、
   `_tools/make_pan_ref.py` / `make_pan_ref_full.py` / `make_pan_show.py`（造参考视频）。

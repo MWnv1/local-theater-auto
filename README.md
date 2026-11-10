@@ -667,7 +667,7 @@ Start-Process "D:\downloads\LobeHub-2.3.2-setup.exe" -ArgumentList "/S","/D=D:\L
 cd D:\AI_T_MCP
 $py = "D:\AI_T_MCP\.venv312\Scripts\python.exe"
 & $py check_env.py                        # 期望 FAIL 0 项
-& $py -m unittest discover -s tests       # 期望 71/71 OK
+& $py -m unittest discover -s tests       # 期望 73/73 OK
 & $py _tools\smoke_clone.py               # 克隆一句，真出 wav
 & $py _tools\e2e_demo.py                  # 2 镜头全链路 → cache\demo_animated.mp4
 & $py _tools\probe_similar.py             # 参考视频 → 逐帧偏移 + 相似视频 + 相似度报告
