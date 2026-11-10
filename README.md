@@ -487,12 +487,19 @@ D:\AI_T_MCP\.venv312\Scripts\python.exe D:\AI_T_MCP\_tools\probe_flux.py bf16_se
 3. **AI 分析**：`describe_motion` 把偏移序列归纳成人话（静止 / 向右平移 / 向下平移 + 顺时针旋转…）
    和一句英文生成提示；`SIM_MOTION_LLM=1` 时再交给本地 Qwen3-4B 改写这句提示
    （默认关：加载 7.5 GB 权重约 147 s，只在连着跑多段视频时才值）。
-4. **再生成**：`prompt_all = "<用户提示>, <运动提示>"`，逐帧 img2img；
-   `i>0` 且 `SIM_MOTION_WARP=1` 时，init image 用**上一帧的生成图**按本帧偏移推过去
-   （`_warp_prev`），让画风与运动轨迹一路传下去，而不是每帧都从原片重新起手。
-   只有"整帧都在动"才推：`frame_offset` 顺带算 `changed`（像素变化比例），
-   ≥60% 相邻帧几乎不动但仍有 2% 以上像素在变 → 判为 `kind=local`（主体自己在动），
-   此时推整帧会把背景一起带走，所以改回用原帧当 init。
+4. **再生成**：`prompt_all = "<用户提示>, <运动提示>"`，逐帧 img2img。
+   默认每帧都用**原片**当 init（`SIM_MOTION_WARP=0`）——1.5.0 之前默认把上一帧
+   "生成图"推过去，结果瑕疵逐帧累加，第八帧全是纹（见 13.5 的"果冻"）。
+   想让画风更连续可以把 `SIM_MOTION_WARP=1` 打开，但只在你确认单帧质量够好时用。
+   三个质量闸门是硬编码的，不是可选项：
+   - **步数下限**：`_restyle()` 里 `steps = max(steps, ceil(12/strength))`，
+     保证实际去噪 `int(steps*strength) ≥ 12`；
+   - **尺度**：默认在 768 长边上重绘，512 会把细节抹平再放大；
+   - **兜底混合**：出图后跟原帧算边缘 IoU，低于 `SIM_MIN_IOU` 就按 `SIM_GUARD_MIX`
+     混回原帧，宁可保守也不交一张糊块。
+   有 `controlnet-sd15-canny` 权重时自动切到 `StableDiffusionControlNetImg2ImgPipeline`，
+   canny 条件每帧从原帧现算（PIL 实现，不装 opencv），轮廓由 ControlNet 锁住，
+   strength 可以用到 0.45 而不跑偏。
 5. **落盘可核对**：`workdir\motion.json` 存 summary / llm_hint / prompt_used / 全部 offsets；
    `out_info["motion"]` 带 summary、前 16 条 offsets、`kind` 与 `warped_frames`（真正推了几帧）。
 
@@ -582,11 +589,17 @@ Start-Process "D:\downloads\LobeHub-2.3.2-setup.exe" -ArgumentList "/S","/D=D:\L
 | `ANIM_FPS` | `24` | 动画渲染帧率（成片仍按 `VIDEO_FPS` 编码） |
 | `SIM_VIDEO_BACKEND` | `auto` | `auto/img2img/none` |
 | `SIM_SD_MODEL` | `MODEL_ROOT/sd15-base` | SD1.5 目录 |
-| `SIM_SIZE` / `SIM_STEPS` / `SIM_STRENGTH` | `512` / `8` / `0.45` | 重绘长边 / 采样步数 / 改动强度 |
+| `SIM_SIZE` / `SIM_STEPS` / `SIM_STRENGTH` | `768` / `32` / `0.35` | 重绘长边 / 采样步数 / 改动强度（`SIM_STRENGTH` 留空=按有无 ControlNet 自动 0.35/0.45） |
+| `SIM_MIN_DENOISE` | `12` | **去噪步数下限**：强制 `steps*strength ≥ 该值`；低于 10 步就会出"果冻" |
+| `SIM_SEED` | `20261110` | 固定种子（逐帧同一噪声，画面不抖）；`-1` = 每帧随机 |
+| `SIM_GUARD` / `SIM_MIN_IOU` / `SIM_GUARD_MIX` | `1` / `0.22` / `0.55` | 出图后与原帧比边缘 IoU，低于阈值就按比例混回原帧（兜底防糊） |
+| `SIM_CONTROLNET` | `auto` | `auto/on/off`：有 Canny ControlNet 权重时用它锁轮廓（`on` 但没权重会打警告并回落） |
+| `SIM_CONTROLNET_DIR` | `D:\AI_T_MCP\models\controlnet-sd15-canny` | ControlNet 权重目录（`config.json` + `diffusion_pytorch_model.fp16.safetensors`） |
+| `SIM_CONTROLNET_SCALE` | `0.9` | ControlNet 条件强度；越大越贴原轮廓 |
 | `SIM_MAX_FRAMES` | `240` | 最多重绘多少帧（超出按等间隔抽帧，再复制回原帧率保住时长） |
 | `SIM_MOTION_SIZE` | `256` | 逐帧偏移分析的分析尺度（长边像素）；越小越快、越抗噪 |
 | `SIM_MOTION_LLM` | `0` | `1` = 让本地 Qwen3-4B 把运动统计改写成一句画面描述；`0` = 用规则模板 |
-| `SIM_MOTION_WARP` | `1` | `1` = 上一帧生成图按本帧偏移推成下一帧 init；`0` = 每帧都用原片 |
+| `SIM_MOTION_WARP` | `0` | `1` = 上一帧生成图按本帧偏移推成下一帧 init；`0` = 每帧都用原片（默认 0，见 13.5） |
 | `THEATER_LIBRARY` | `项目根/library` | 素材库根目录（索引 `index.json`） |
 | `LIBRARY_MIN_SCORE` / `LIBRARY_FIRST` | `0.45` / `1` | 命中阈值 / 是否先查库 |
 | `LLM_BACKEND` | `auto` | `auto/torch/openvino` |
@@ -608,19 +621,25 @@ Start-Process "D:\downloads\LobeHub-2.3.2-setup.exe" -ArgumentList "/S","/D=D:\L
 | 动作真实性核对（旋转 `rotate`） | 抽 0.2 s 与 1.0 s 两帧：mean_abs_diff 0.0085，3.6% 像素在动 |
 | 动作真实性核对（平移 `pan_right`） | 同法：mean_abs_diff 0.0166，6.8% 像素在动（人物 0.2~1.0 s 内右移约 240 px） |
 | 参考视频 → 相似视频（24 帧，旧版对照） | 24.2 s（当时未做逐帧运动分析），出片 6.0 s / 30 fps / 1920×1080 / 180 帧 / 保留了原音轨 |
-| 参考视频 → 相似视频（8 帧，含逐帧运动分析） | 226.4 s 里首帧 209.9 s（含 SD 管道加载 82 s 与 CUDA 预热）、其余 0.7~1.1 s/帧；出片 3.0 s / 24 fps / 1920×1080 / 保留原音轨 |
-| 相似度报告 | 时长偏差 0.0%，fps 与分辨率一致，边缘 IoU 均值 0.34 |
-| 逐帧运动分析 → 全画面平移参考（8 帧） | 判为 `global` 向左平移 84 px/帧；生成片实测 82.5 px/帧，`direction_match=true`，`speed_ratio=1.027`；7/7 帧用上一帧生成图按偏移推 init |
+| 参考视频 → 相似视频（8 帧，含逐帧运动分析） | 141.3 s（1.5.0 加速版）；修复后 768 尺度 + 32 步：124.0 s，2.1 s/帧 |
+| 相似度报告 | 时长偏差 0.0%，fps 与分辨率一致，边缘 IoU 均值 **0.42**（修复前 0.08，同一尺度化后的指标） |
+| 逐帧运动分析 → 全画面平移参考（8 帧） | 判为 `global` 向左平移 84 px/帧；生成片实测 84.0 px/帧，`direction_match=true`，`speed_ratio=1.018`；`warped_frames=0`（默认不再推上一帧） |
 | 逐帧运动分析 → 局部动作参考（人物在静态背景里平移） | 判为 `local`（3% 像素在变），不推整帧，改回用原帧当 init |
 | 逐帧运动分析 → 自家动画成片 | 判为 `static`（0.3% 像素在变），阈值不误报 |
-| SD1.5 img2img 稳态单帧 | 512 px 重绘再放大回 1080p：首帧含 CUDA 预热 ~30 s，之后 0.7~1.1 s/帧（直接在 1080p 上跑是 75 s/帧） |
-| 剧本生成（Qwen3-4B bf16） | 加载 147 s + 生成 6 镜头 32 s（合计 179.8 s） |
+| SD1.5 img2img 稳态单帧 | 768 px 重绘再放大回 1080p：首帧含模型加载 107 s，之后 2.0~2.1 s/帧（512 px 是 0.7~1.1 s/帧，但细节会被抹平） |
+| 剧本生成（Qwen3-4B bf16） | 加载 147 s + 生成 6 镜头 32 s（合计 179.8 s）；NF4 4bit 加载 82 s |
 | FLUX 出图（基线，供对比） | 512 px ≈ 21 分钟 / 1024 px 1504 s（sequential offload） |
 
 ### 13.5 这一节踩过的坑（症状 → 原因 → 解法）
 
 | 症状 | 原因 | 解法 |
 |---|---|---|
+| **相似视频整幅变成大理石纹 / 融化果冻，人物五官糊成一团** | `SIM_STEPS=8` 配 `SIM_STRENGTH=0.35`，diffusers 实际只跑 `int(8*0.35)=2` 步 —— 等于拿噪声直接出图；512 尺度下 16:9 只剩 512×288，细节全丢再放大；`SIM_MOTION_WARP=1` 又把上一帧的糊块当下一帧 init，逐帧放大 | 三处一起改：`_restyle()` 强制 `steps*strength ≥ 12`（`SIM_MIN_DENOISE`）、`SIM_SIZE=768`、`SIM_MOTION_WARP` 默认 `0`；另加 `_guard_blend()`（边缘 IoU 低于 `SIM_MIN_IOU` 就混回原帧）与固定 `SIM_SEED`。实测边缘 IoU 0.0805 → 0.4298（8 帧均值），画面恢复成"同一间屋子" |
+| 边缘 IoU 同一对 1080p 图只有 0.08，缩到 768 立刻 0.41 | 1080p 上边缘只有 1 px 宽，`FIND_EDGES` + `GaussianBlur(3)` 之后几乎没剩下像素 | `_edge_mask()` 先缩到 768 长边再取边缘，指标才和 guard 内部的计算同尺度、可比 |
+| ControlNet 报 `no file named diffusion_pytorch_model.bin` | 官方仓库只放 `*.fp16.safetensors`，diffusers 默认找 `.bin` | `ControlNetModel.from_pretrained(..., variant="fp16")`，失败再回退不带 variant |
+| 纯色画面喂给 ControlNet 后满屏乱生 | PIL `FIND_EDGES` 对纯色返回常数 128，`autocontrast` 又把它拉成全白 | `_canny_edges()` 先数直方图众数（≥97% 同一值）判"无边缘"返全黑；否则用 5%/99% 分位归一化 + 阈值 160 |
+| 逐帧画面抖（同一场景每帧细节乱跳） | 每帧独立随机噪声 | `SIM_SEED` 固定（默认 20261110），逐帧同一噪声源 |
+| ControlNet 报 `control_image` 尺寸/通道不对 | ControlNet 要黑底白线单通道图，直接用原图会全白 | `_canny_edges()`：灰度 → `FIND_EDGES` → `autocontrast` → 阈值 → `MaxFilter(3)` 加粗 → 转 RGB |
 | `use_ema=False` 报一大串 Missing/Unexpected key | 官方 ckpt 里键名全是 `ema_model.*` | `F5TTS(..., use_ema=True)` |
 | 克隆时仍联网要下 vocos | F5 自己走 `hf_hub_download`，monkeypatch `Vocos.from_pretrained` 无效 | 传 `vocoder_local_path=<同时有 config.yaml 与 pytorch_model.bin 的目录>` |
 | `OSError: [WinError 127]` 读音频 | torchaudio 2.9 的 `load` 改走 torchcodec，torchcodec 要共享版 ffmpeg（本项目是静态构建） | `_patch_f5_audio_io()` 把 `load` 换成 soundfile；重采样仍用 `torchaudio.functional` |

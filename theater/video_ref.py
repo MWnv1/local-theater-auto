@@ -18,14 +18,26 @@
   * 时长、帧率、分辨率与原片一致（时长偏差 ≤5%）；
   * 构图/运动与原片一致 —— 先把原片逐帧比出"这一帧相对上一帧平移多少、转多少"
     （相位相关 + 旋转搜索，见 frame_offset / analyze_motion），把统计结果交给
-    AI 归纳成一句画面描述，再用逐帧 img2img 重绘：上一帧的生成图按本帧偏移
-    推到本帧位置当 init image，运动轨迹因此一路传下去；
+    AI 归纳成一句画面描述，再用逐帧 img2img 重绘；
   * 音轨默认保留原片（可用 keep_audio=False 关掉）。
 
 为什么不直接用 SVD / Wan-VACE：16 GB 显存跑 14B 视频模型要么爆显存，要么
 一条 5 秒视频要几十分钟；而"参考视频 → 相似视频"真正要保的是构图和运动，
-逐帧 img2img（SD1.5，8 步左右）在 512 长边上每帧 0.3~0.6 秒，5 秒视频约 1 分钟，
-质量与速度的平衡明显更好。需要更强的动作一致性时把 strength 调低到 0.3 左右。
+逐帧 img2img（SD1.5）在 768 长边上每帧 2 秒左右，5 秒视频约 1 分钟。
+
+**2026-11-10 修过的"果冻"事故（重点，别再踩）**
+  症状：生成片整幅变成大理石纹/融化块，人物五官糊成一团。
+  原因不是"模型不行"，是**去噪步数不够**：`num_inference_steps=8` 配
+  `strength=0.45` 实际只跑 4 步（SD 按 `int(steps*strength)` 取整），
+  `strength=0.28` 只剩 2 步，等于拿着噪声直接出图。三个修复：
+    1. `_restyle()` 强制 `steps*strength >= SIM_MIN_DENOISE`（默认 12 步），
+       `SIM_STEPS=32`，于是 0.35 强度实际跑 11 步、0.45 跑 14 步；
+    2. 重绘尺度 512 → **768**：512 长边上 16:9 只有 512×288，细节全丢，
+       放大回 1080p 就是一片糊；768 下边缘 IoU 从 0.44 提到 0.57；
+    3. `SIM_MOTION_WARP` 默认 **0**：把上一帧的"生成图"当下一帧 init 会
+       把瑕疵一路累积（第一帧糊一点，第八帧全是纹），每帧直接用原片最稳。
+  另外加了 `_guard_blend()`：出图后跟原帧算边缘 IoU，低于 `SIM_MIN_IOU`
+  就按 `SIM_GUARD_MIX` 跟原帧混合，宁可保守也不交一张"果冻"。
 
 后端：
   SIM_VIDEO_BACKEND=auto|img2img|none
@@ -35,7 +47,7 @@
 运动分析：
   SIM_MOTION_SIZE=256   分析尺度（长边像素），越小越快越鲁棒
   SIM_MOTION_LLM=0      0=用规则模板出英文提示；1=加载本地 Qwen3-4B 改写
-  SIM_MOTION_WARP=1     1=把上一帧生成图按偏移推成下一帧 init；0=每帧都用原片
+  SIM_MOTION_WARP=0     1=把上一帧生成图按偏移推成下一帧 init；0=每帧都用原片
 """
 
 import json
@@ -50,10 +62,20 @@ from PIL import Image
 from . import MODEL_ROOT, ffmpeg_path, ffprobe_path, subdir
 
 SIM_SD_MODEL = os.environ.get("SIM_SD_MODEL", os.path.join(MODEL_ROOT, "sd15-base"))
+SIM_CONTROLNET_DIR = os.environ.get(
+    "SIM_CONTROLNET_DIR", r"D:\AI_T_MCP\models\controlnet-sd15-canny")
 SIM_BACKEND = os.environ.get("SIM_VIDEO_BACKEND", "auto")
-SIM_SIZE = int(os.environ.get("SIM_SIZE", "512"))
-SIM_STEPS = int(os.environ.get("SIM_STEPS", "8"))
-SIM_STRENGTH = float(os.environ.get("SIM_STRENGTH", "0.45"))
+SIM_SIZE = int(os.environ.get("SIM_SIZE", "768"))
+SIM_STEPS = int(os.environ.get("SIM_STEPS", "32"))
+_SIM_STRENGTH_ENV = os.environ.get("SIM_STRENGTH", "").strip()
+SIM_STRENGTH = float(_SIM_STRENGTH_ENV) if _SIM_STRENGTH_ENV else 0.35
+SIM_CONTROLNET = os.environ.get("SIM_CONTROLNET", "auto")   # auto|on|off
+SIM_CN_SCALE = float(os.environ.get("SIM_CONTROLNET_SCALE", "0.9"))
+SIM_MIN_DENOISE = int(os.environ.get("SIM_MIN_DENOISE", "12"))
+SIM_SEED = int(os.environ.get("SIM_SEED", "20261110"))
+SIM_GUARD = os.environ.get("SIM_GUARD", "1")
+SIM_MIN_IOU = float(os.environ.get("SIM_MIN_IOU", "0.22"))
+SIM_GUARD_MIX = float(os.environ.get("SIM_GUARD_MIX", "0.55"))
 SIM_MAX_FRAMES = int(os.environ.get("SIM_MAX_FRAMES", "240"))
 
 _pipe = None
@@ -181,7 +203,8 @@ def edge_iou(a_path: str, b_path: str, size: int = 256, thresh: int = 28) -> flo
 # ---------------------------------------------------------------------------
 MOTION_SIZE = int(os.environ.get("SIM_MOTION_SIZE", "256"))
 SIM_MOTION_LLM = os.environ.get("SIM_MOTION_LLM", "0")
-SIM_MOTION_WARP = os.environ.get("SIM_MOTION_WARP", "1")
+# 默认 0：用上一帧"生成图"当 init 会把瑕疵逐帧放大（1.5.0 前的"果冻"根因之一）
+SIM_MOTION_WARP = os.environ.get("SIM_MOTION_WARP", "0")
 
 
 def _truthy(val) -> bool:
@@ -477,15 +500,164 @@ def _get_pipe():
     return _pipe
 
 
+def _controlnet_available() -> bool:
+    """ControlNet 目录里同时有 config.json 与 fp16 权重才算可用。"""
+    if not os.path.isdir(SIM_CONTROLNET_DIR):
+        return False
+    if not os.path.exists(os.path.join(SIM_CONTROLNET_DIR, "config.json")):
+        return False
+    for fn in ("diffusion_pytorch_model.fp16.safetensors",
+               "diffusion_pytorch_model.safetensors"):
+        if os.path.exists(os.path.join(SIM_CONTROLNET_DIR, fn)):
+            return True
+    return False
+
+
+_cn_pipe = None
+
+
+def _get_controlnet_pipe():
+    """SD1.5 + Canny ControlNet 的 img2img 管道（可选，目录不在就返回 None）。
+
+    为什么不默认用它：多一个 720 MB 模型、每帧多 0.4 秒；但只要它在，
+    strength 就能开到 0.5 还不跑偏——轮廓由 ControlNet 锁住，模型只改材质和光。
+    """
+    global _cn_pipe
+    if _cn_pipe is not None:
+        return _cn_pipe
+    if not _controlnet_available():
+        return None
+    import torch
+    from diffusers import ControlNetModel, StableDiffusionControlNetImg2ImgPipeline
+
+    from . import accelerator
+
+    accel = accelerator.apply_global()
+    dtype = accelerator.sd_kwargs()["torch_dtype"]
+    try:
+        # 官方仓库只放 fp16 权重，必须显式指 variant，否则 diffusers 找 .bin 找不到
+        cn = ControlNetModel.from_pretrained(SIM_CONTROLNET_DIR, torch_dtype=dtype,
+                                             variant="fp16", local_files_only=True)
+    except Exception:
+        cn = ControlNetModel.from_pretrained(SIM_CONTROLNET_DIR, torch_dtype=dtype,
+                                             local_files_only=True)
+    _cn_pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
+        SIM_SD_MODEL, controlnet=cn, torch_dtype=dtype, safety_checker=None,
+        requires_safety_checker=False, local_files_only=True,
+    )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    _cn_pipe = _cn_pipe.to(device)
+    _cn_pipe.set_progress_bar_config(disable=True)
+    if device == "cuda":
+        accelerator.optimize_pipe(_cn_pipe)
+    print(f"[accel] ControlNet canny 就绪（dtype={str(dtype).replace('torch.', '')}，"
+          f"conditioning_scale={SIM_CN_SCALE}，attention={accel['attention']}）")
+    return _cn_pipe
+
+
+def _canny_edges(im, low: int = 60, high: int = 160):
+    """给 ControlNet 用的 canny 近似图（PIL 实现，不装 opencv）。
+
+    ControlNet 期望"黑底白线"。PIL 的 FIND_EDGES 只给梯度幅值，所以按本帧自身的
+    2%/98% 分位归一化，再按阈值二值化，最后用 MaxFilter 把线加粗一点。
+    不用 `autocontrast`：纯色画面（照墙、过场）经 autocontrast 会被"拉"成全白，
+    ControlNet 拿到全白条件就会到处乱生东西；这里先数直方图众数占比，画面对
+    97% 以上是同一个梯度值就直接返全黑（= 无条件，退回纯 img2img）。
+    """
+    import numpy as np
+    from PIL import ImageFilter
+
+    g = im.convert("L").filter(ImageFilter.GaussianBlur(2.5))
+    e = g.filter(ImageFilter.FIND_EDGES)
+    arr = np.asarray(e, dtype=np.uint8)
+    hist = np.bincount(arr.ravel(), minlength=256)
+    if hist.max() >= 0.97 * arr.size:
+        return Image.new("RGB", im.size, (0, 0, 0))
+    lo, hi = np.percentile(arr, [5, 99])
+    if hi - lo < 12:
+        return Image.new("RGB", im.size, (0, 0, 0))
+    arr = np.clip((arr.astype(np.float32) - lo) * (255.0 / (hi - lo)), 0, 255)
+    arr = np.where(arr > high, 255, 0).astype(np.uint8)
+    e = Image.fromarray(arr, mode="L").filter(ImageFilter.MaxFilter(3))
+    return e.convert("RGB")
+
+
+def _edge_mask(im, size: int = 768):
+    """粗略边缘掩码（PIL 实现，不引入 opencv）。
+
+    先缩到 768 长边再取边缘：同一对 1080p 图在原尺寸上边缘像素只有 1 px 宽，
+    模糊一下就没剩几个点，IoU 会莫名掉到 0.08；缩放后同一对图稳定在 0.4 左右，
+    指标才有可比性。
+    """
+    import numpy as np
+    from PIL import ImageFilter
+
+    if max(im.size) > size:
+        scale = size / float(max(im.size))
+        im = im.resize((max(1, int(im.size[0] * scale)), max(1, int(im.size[1] * scale)),
+                        ), Image.Resampling.LANCZOS)
+    g = im.convert("L").filter(ImageFilter.FIND_EDGES).filter(ImageFilter.GaussianBlur(3))
+    return np.asarray(g, dtype=np.uint8) > 40
+
+
+def _edge_iou(a, b) -> float:
+    import numpy as np
+
+    ea, eb = _edge_mask(a), _edge_mask(b)
+    inter = np.logical_and(ea, eb).sum()
+    union = np.logical_or(ea, eb).sum()
+    return float(inter / max(union, 1))
+
+
+def _guard_blend(gen, src, iou: float):
+    """出图跟原帧的边缘差太多就按比例混回原帧 —— 宁可保守，也不交"果冻"。"""
+    if not _truthy(SIM_GUARD) or iou >= SIM_MIN_IOU:
+        return gen, False
+    mix = min(0.85, max(0.2, SIM_GUARD_MIX))
+    return Image.blend(gen, src, mix), True
+
+
+def _controlnet_on() -> bool:
+    """是否真的启用 ControlNet：明确 on 但没有权重 → 打印一次回落提示。"""
+    mode = str(SIM_CONTROLNET).strip().lower()
+    if mode in ("off", "0", "false", "no"):
+        return False
+    if _controlnet_available():
+        return True
+    if mode in ("on", "1", "true", "yes"):
+        print(f"[warn] SIM_CONTROLNET={SIM_CONTROLNET} 但 {SIM_CONTROLNET_DIR} 没有权重，"
+              "回落到普通 img2img")
+    return False
+
+
+def _default_strength() -> float:
+    """默认 0.35：有 ControlNet 时同一强度下轮廓更贴原帧（实测 0.35/scale 0.9）。
+
+    别指望"有 CN 就可以开到 0.45"——实测 0.45 会在墙面/天花板上刷出颗粒噪点，
+    反而更像事故现场；结构的收益在 0.35 已经吃满。
+    """
+    if _SIM_STRENGTH_ENV:
+        return SIM_STRENGTH
+    return 0.35
+
+
 def _restyle(frame_path: str, out_path: str, prompt: str, negative: str,
              strength: float, steps: int) -> str:
     """单帧 img2img：原帧作 init image，低 strength 保构图。
 
-    重绘在 `SIM_SIZE` 长边上做，出图后再放回原分辨率。直接在 1080p 上跑 img2img
-    在本机是 ~75 秒/帧（24 帧要半小时），缩到 512 后是 ~1 秒/帧，而"相似"要的
-    构图和运动跟分辨率无关——像素级细节本来也会被 strength 改掉。
+    重绘在 `SIM_SIZE`（默认 768）长边上做，出图后再放回原分辨率。直接在 1080p 上
+    跑 img2img 在本机是 ~75 秒/帧；缩到 768 是 ~2 秒/帧，而"相似"要的构图和运动
+    跟分辨率无关。512 太小（16:9 只剩 512×288），细节被抹平后再放大就是糊。
+
+    **步数下限**：diffusers 实际只跑 `int(num_inference_steps * strength)` 步。
+    8 步配 0.35 强度只有 2 步，出来就是噪声糊块（2026-11-10 的"果冻"）。
+    所以这里强制 `steps*strength >= SIM_MIN_DENOISE`（默认 12）。
+
+    有 ControlNet 权重时（`SIM_CONTROLNET_DIR`）走 canny 条件：轮廓由 ControlNet
+    锁住，模型只改材质/光线，人物五官不会被 strength 抹掉。
     """
-    pipe = _get_pipe()
+    cn_on = _controlnet_on()
+    pipe = _get_controlnet_pipe() if cn_on else _get_pipe()
     init = Image.open(frame_path).convert("RGB")
     w, h = init.size
     work = init
@@ -495,10 +667,28 @@ def _restyle(frame_path: str, out_path: str, prompt: str, negative: str,
         nw = max(64, int(round(w * scale / 8.0)) * 8)
         nh = max(64, int(round(h * scale / 8.0)) * 8)
         work = init.resize((nw, nh), Image.Resampling.LANCZOS)
+
+    strength = min(0.95, max(0.05, float(strength)))
+    total = max(2, int(steps), int(math.ceil(SIM_MIN_DENOISE / strength)))
+    kwargs = {}
+    if SIM_SEED >= 0:
+        import torch
+
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        kwargs["generator"] = torch.Generator(device=dev).manual_seed(SIM_SEED)
+
     gen = pipe(
         prompt=prompt, negative_prompt=negative, image=work, strength=strength,
-        num_inference_steps=max(2, steps), guidance_scale=7.0,
+        num_inference_steps=total, guidance_scale=7.0, **kwargs,
+        **({"control_image": _canny_edges(work),
+            "controlnet_conditioning_scale": SIM_CN_SCALE} if cn_on else {}),
     ).images[0]
+
+    iou = _edge_iou(work, gen)
+    gen, blended = _guard_blend(gen, work, iou)
+    if blended:
+        print(f"[guard] 边缘 IoU {iou:.3f} < {SIM_MIN_IOU}，按 {SIM_GUARD_MIX} 混回原帧")
+
     if gen.size != (w, h):
         gen = gen.resize((w, h), Image.Resampling.LANCZOS)
     gen.save(out_path)
@@ -531,7 +721,7 @@ def generate_similar_video(ref_path: str, prompt: str, out_path: str,
     duration, fps = info["duration"], info["fps"]
     if duration <= 0:
         raise RuntimeError("参考视频时长为 0，无法复刻")
-    strength = SIM_STRENGTH if strength is None else float(strength)
+    strength = _default_strength() if strength is None else float(strength)
     steps = SIM_STEPS if steps is None else int(steps)
     backend = (backend or SIM_BACKEND or "auto").lower()
     if backend == "auto":
@@ -564,7 +754,9 @@ def generate_similar_video(ref_path: str, prompt: str, out_path: str,
 
     negative = os.environ.get(
         "SIM_NEGATIVE",
-        "blurry, low quality, watermark, text, deformed, extra limbs, jpeg artifacts",
+        "blurry, out of focus, low contrast, low quality, jpeg artifacts, distorted, "
+        "melting, warped, smeared, extra limbs, bad anatomy, deformed face, "
+        "grainy, noisy, speckles, dithering, dust, watermark, text, oversaturated",
     )
 
     out_frames: List[str] = []

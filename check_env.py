@@ -251,6 +251,14 @@ def check_new_capabilities():
         f"分析尺度 {video_ref.MOTION_SIZE}px，AI 分析={'开' if video_ref.MOTION_LLM_ON else '关'}，"
         f"运动作 init={'开' if video_ref.MOTION_WARP_ON else '关'}")
 
+    cn_ok = video_ref._controlnet_available()
+    add(OK if cn_ok else WARN, "ControlNet canny（可选）",
+        f"{video_ref.SIM_CONTROLNET_DIR}（scale={video_ref.SIM_CN_SCALE}）" if cn_ok
+        else f"未放权重，走普通 img2img：{video_ref.SIM_CONTROLNET_DIR}")
+    add(OK, "相似视频质量闸门",
+        f"重绘长边 {video_ref.SIM_SIZE}px / {video_ref.SIM_STEPS} 步 / "
+        f"去噪下限 {video_ref.SIM_MIN_DENOISE} / guard IoU≥{video_ref.SIM_MIN_IOU}")
+
     from theater import accelerator
 
     accel = accelerator.status()

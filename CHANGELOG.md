@@ -3,6 +3,57 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.5.1] - 2026-11-10
+
+修 1.5.0 交付的"果冻"：参考视频 → 相似视频整幅变成大理石纹/融化块。
+三处根因同时叠加才出这个效果，单改一处都不够。
+
+### Fixed
+
+- **去噪步数不足（主因）**：diffusers 的 img2img 实际只跑
+  `int(num_inference_steps * strength)` 步。原 `SIM_STEPS=8` 配 `SIM_STRENGTH=0.35`
+  只剩 **2 步**，等于拿噪声直接出图。`_restyle()` 现在强制
+  `steps*strength ≥ SIM_MIN_DENOISE`（默认 12），传 8 步会被抬到 35 步。
+- **重绘尺度太小**：`SIM_SIZE=512` 在 16:9 上只有 512×288，细节被抹平后再 LANCZOS
+  放回 1080p 就是一片糊。改用 `768`（同参数对照：边缘 IoU 0.5749 vs 0.4449）。
+- **上一帧生成图作 init 累积瑕疵**：`SIM_MOTION_WARP` 默认从 `1` 改为 `0`，
+  每帧都从原片起手；想连续画风再手动开 `1`。
+- 新增 `_guard_blend()`：出图后与原帧算边缘 IoU，低于 `SIM_MIN_IOU`（0.22）就按
+  `SIM_GUARD_MIX`（0.55）混回原帧 —— 兜底"宁可保守也不交糊块"。
+
+### Added
+
+- 固定种子 `SIM_SEED`（默认 20261110），逐帧同一噪声源，消除同场景细节乱跳。
+- **Canny ControlNet 分支（已实测启用）**：`SIM_CONTROLNET=auto|on|off`、
+  `SIM_CONTROLNET_DIR`、`SIM_CONTROLNET_SCALE`（默认 0.9）。权重
+  `lllyasviel/control_v11p_sd15_canny`（fp16，722,598,642 B，sha256
+  `9ed3a7f8…c0bc` 已校验）放在 `models/controlnet-sd15-canny/`；存在时自动改用
+  `StableDiffusionControlNetImg2ImgPipeline`。canny 图由 `_canny_edges()` 用 PIL + numpy
+  现算（不装 opencv）：先按直方图众数判"纯色无边缘"，再用 5%/99% 分位归一化 + 阈值，
+  `MaxFilter(3)` 加粗。实测额外加载约 60 s、每帧 +0.2 s，同一帧边缘 IoU 0.451（无 CN 是 0.414）。
+  权重缺失或显式 `off` 时打印警告并回落普通 img2img。
+- 新环境变量：`SIM_MIN_DENOISE`、`SIM_SEED`、`SIM_GUARD`、`SIM_MIN_IOU`、
+  `SIM_GUARD_MIX`、`SIM_CONTROLNET`、`SIM_CONTROLNET_DIR`、`SIM_CONTROLNET_SCALE`。
+- `theater/video_ref.py` 模块 docstring 记录"2026-11-10 果冻事故"的完整复盘。
+- `tests/test_sim_quality.py`：9 条回归（默认值就是修好的那组、步数下限、固定种子、
+  guard 把纯色输出混回原帧、好图不被改、边缘 IoU 能识别垃圾、canny 黑白图与纯色全黑、
+  CN 权重齐备判定、CN 权重缺失回落）。
+- 负向提示词补 `melting / warped / smeared / deformed face / out of focus / low contrast /
+  grainy / noisy / speckles / dithering / dust`。
+
+### Changed
+
+- **边缘 IoU 指标改成尺度无关**：`_edge_mask()` 先缩到 768 长边再取边缘，否则同一对
+  1080p 图只有 0.08、缩到 768 却有 0.41，数字没法比。改完的统一口径：果冻版
+  **0.0805** → 修复版 **0.4298**（8 帧均值，纯 img2img）/ **0.4281**（带 ControlNet）。
+- 修复后实测（8 帧全画面平移参考）：运动判定仍是 `global` 向左 84 px/帧、
+  生成片 82.5 px/帧，`direction_match=true`、`speed_ratio=1.009`、`warped_frames=0`；
+  整条 124 s 左右（2.0~2.2 s/帧，权重加载另计 ~60~100 s）。
+- `_controlnet_on()` 默认强度回到 0.35：实测 0.45 会在墙面/天花板刷出颗粒噪点，
+  结构的收益在 0.35 已经吃满。
+- README §13.1.2 / §13.3 / §13.4 / §13.5 同步（步数下限、尺度、guard、ControlNet 与踩坑表）。
+- 测试总数 83 → 92（83 + 9）。
+
 ## [1.5.0] - 2026-11-10
 
 加入 CUDA / Tensor Core 调用与"按本机配置"的量化。默认行为更省显存、更快，
