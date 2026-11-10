@@ -236,8 +236,17 @@ def theater_animate_character(char_image: str, action: str = "wave", seconds: fl
                         "actions": sorted(animator.ACTIONS)})
         rig = rigging.rig_for(char_image)
         clip = animator.render_clip(rig, action, float(seconds), int(fps))
+        # 报"这个动作的最大位移"而不是 t=0 的零点，调用方一眼能看出动了多少
+        from PIL import Image
+
+        period = float(animator.ACTIONS.get(action, {}).get("period", 3.0))
+        poses = [animator.pose_at(action, period * k / 40.0) for k in range(41)]
+        peak = max(poses, key=lambda p: abs(p["dx"]) * 1000 + abs(p["dy"]) * 1000 + abs(p["rot"]))
+        size = Image.open(char_image).size
         return _ok({"rig": {"signature": rig.get("signature"), "parts": len(rig.get("parts", []))},
-                    "action": action, "motion": animator.pose_at(action, 0.0), "clip": clip})
+                    "action": action,
+                    "motion": {"peak": peak, "px": animator.transform_px(peak, size)},
+                    "clip": clip})
     except Exception as e:
         return _err("theater_animate_character", e)
 
